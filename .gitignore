@@ -1,0 +1,5 @@
+*.txt
+*.ly
+*.mid
+*.pdf
+__pycache__/
