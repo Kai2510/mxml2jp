@@ -87,11 +87,16 @@ ARTICS = {
 }
 
 FR_TECHNICAL = {
-    'stopped': '▼',            # 顿音 → same as staccato
     'open': '0',               # 空弦 → Fr=0
     'snap-pizzicato': 'up',    # 左手拨弦 → ↗
-    'up-bow': None,            # handled in ARTICS (→ \upbow)
-    'down-bow': None,          # handled in ARTICS (→ \downbow)
+}
+
+# One-word LilyPond \commands for technical elements (passed through by jianpu-ly)
+LP_TECHNICAL = {
+    'harmonic': r'\flageolet',           # natural harmonic
+    'stopped': r'\stopped',              # 右手拨弦 / pizzicato
+    'open': r'\open',                    # open string
+    'snap-pizzicato': r'\snappizzicato', # snap / bartok pizz
 }
 
 # One-word LilyPond \commands for technical elements (passed through by jianpu-ly)
