@@ -674,8 +674,8 @@ class JianpuGenerator:
             r = round(v)
             if abs(v - r) < 0.01:
                 return (r, beat_type)
-        # Fallback: use 16th notes to approximate
-        r = round(q * 4)
+        # Fallback: ceil to ensure bar fits all notes
+        r = int(q * 4 + 0.999)
         return (r, 16)
 
     def _generate_part(self, measures):
@@ -739,13 +739,25 @@ class JianpuGenerator:
             treated_rubato = False  # whether LP blocks were emitted
 
             divs = mdata.get('divisions', 420)
-            total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
-                        for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')
-                        and not n.get('is_chord')) / 16.0
+            total_q = sum(n.get('duration', 0) for n in raw_notes
+                        if not n.get('is_grace') and not n.get('is_measure_rest')
+                        and not n.get('is_chord')) / float(divs)
+            # Also compute jianpu-style total (type-based, for barcheck matching)
+            jp_total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
+                           for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')
+                           and not n.get('is_chord')) / 16.0
+            # Use the larger value for time sig computation
+            total_q = max(total_q, jp_total_q)
             expected_q = cur_time[0] * 4.0 / cur_time[1]
+
+            # Detect tuplet presence for precision padding
+            has_tuplet = any(n.get('tuplet_ratio') for n in raw_notes)
 
             if total_q > expected_q + 0.01:
                 bt, bt_type = self._best_timesig(total_q)
+                # Add extra beat for tuplet-heavy measures (jianpu rounding)
+                if has_tuplet:
+                    bt += 1
                 margin = total_q - expected_q
                 if is_rubato or margin >= 4.0:
                     treated_rubato = True
