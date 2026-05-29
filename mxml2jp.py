@@ -75,9 +75,9 @@ ARTICS = {
 }
 
 FR_TECHNICAL = {
-    'stopped': 'souyin',       # 顿弓 / 闷音
+    'stopped': '▼',            # 顿音 → same as staccato
     'open': '0',               # 空弦
-    'snap-pizzicato': 'up',    # 左手拨弦 → ↗ 记号
+    'snap-pizzicato': 'up',    # 左手拨弦 → ↗
 }
 
 # Duration type -> jianpu marker (prefix) and beam count
@@ -280,7 +280,8 @@ class MusicXmlParser:
             'time_change': None,
             'tempo': None,
             'dynamic': None,
-            'directions': [],    # list of jianpu tokens for this measure (wedges, etc.)
+            'directions': [],    # list of jianpu tokens (wedges, dynamics, text)
+            'annotations': [],   # text markup tokens: ^"..." or _"..."
             'has_repeat_start': False,
             'has_repeat_end': False,
             'is_final': False,
@@ -337,6 +338,17 @@ class MusicXmlParser:
                             mdata['directions'].append(r'\>')
                         elif wt == 'stop':
                             mdata['directions'].append(r'\!')
+
+                    # Text annotations (words → ^"text" / _"text")
+                    words = dt.find('words')
+                    if words is not None and words.text:
+                        txt = words.text.strip().replace('"', "'")
+                        if txt:
+                            placement = child.get('placement', 'above')
+                            if placement == 'below':
+                                mdata['annotations'].append(f'_{chr(34)}{txt}{chr(34)}')
+                            else:
+                                mdata['annotations'].append(f'^{chr(34)}{txt}{chr(34)}')
 
             elif tag == 'note':
                 note = self._parse_note(child)
@@ -622,7 +634,15 @@ class JianpuGenerator:
             # Split oversized MusicXML measures into sub-bars before token generation
             raw_notes = mdata.get('notes', [])
 
-            # Detect oversize measures (more total duration than current time sig)
+            # Detect oversize measures and rubato / cadenza
+            raw_notes = mdata.get('notes', [])
+
+            # Detect rubato from word annotations
+            is_rubato = any(
+                'rubato' in a.lower() or 'cadenza' in a.lower() or '散' in a
+                for a in mdata.get('annotations', []))
+            treated_rubato = False  # whether LP blocks were emitted
+
             divs = mdata.get('divisions', 420)
             total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
                         for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')) / 16.0
@@ -631,13 +651,26 @@ class JianpuGenerator:
             if total_q > expected_q + 0.01:
                 bt, bt_type = self._best_timesig(total_q)
                 margin = total_q - expected_q
-                sys.stderr.write(
-                    f"WARNING: Measure {mdata.get('number', '?')} has {total_q:.1f}Q — "
-                    f"expected {expected_q:.1f}Q ({cur_time[0]}/{cur_time[1]}). "
-                    f"Using {bt}/{bt_type} (散板).\n")
-                if margin <= 2.0:
+                if is_rubato or margin >= 4.0:
+                    treated_rubato = True
                     sys.stderr.write(
-                        f"  ↳ Only {margin:.1f} beats over — possible input error? Check measure {mdata.get('number', '?')}.\n")
+                        f"WARNING: Measure {mdata.get('number', '?')} ({total_q:.1f}Q vs {expected_q:.1f}Q) "
+                        f"— treating as rubato with {bt}/{bt_type}.\n")
+                    lines.append(
+                        r'LP:\once \override Staff.TimeSignature.stencil = '
+                        r'#(lambda (grob) '
+                        r'(grob-interpret-markup grob '
+                        r'#{ \markup \bold \huge "サ" #}))')
+                    lines.append(':LP')
+                else:
+                    sys.stderr.write(
+                        f"WARNING: Measure {mdata.get('number', '?')} has {total_q:.1f}Q — "
+                        f"expected {expected_q:.1f}Q ({cur_time[0]}/{cur_time[1]}). "
+                        f"Using {bt}/{bt_type}.\n")
+                    if margin <= 2.0:
+                        sys.stderr.write(
+                            f"  ↳ Only {margin:.1f} beats over — possible input error? "
+                            f"Check measure {mdata.get('number', '?')}.\n")
                 cur_time = (bt, bt_type)
                 lines.append(f"{bt}/{bt_type}")
 
@@ -669,6 +702,9 @@ class JianpuGenerator:
                     all_groups.append(mtokens)
 
             if all_groups:
+                # Emit annotations (text markup) at the start of the measure
+                for ann in mdata.get('annotations', []):
+                    lines.append(ann)
                 # Emit repeat marks
                 if mdata.get('has_repeat_start'):
                     lines.append('R{')
@@ -677,6 +713,10 @@ class JianpuGenerator:
                 lines.append(joined)
                 if mdata.get('has_repeat_end'):
                     lines.append('}')
+                # Emit dashed barline LP block if treated as rubato
+                if treated_rubato:
+                    lines.append(r'LP: \bar "!"')
+                    lines.append(':LP')
 
         # Flush remaining multirest
         if multirest_count > 0:

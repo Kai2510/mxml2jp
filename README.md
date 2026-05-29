@@ -233,6 +233,9 @@ R*5    — 5 bars of rest
 | Grace notes (before + after) | ✓ (v0.2.0) |
 | Tremolo (`///`) | ✓ (v0.2.0) |
 | Trill extensions (`\startTrillSpan`/`\stopTrillSpan`) | ✓ (v0.2.0) |
+| Wedges / hairpins (`\<`, `\>`, `\!`) | ✓ (v0.2.0) |
+| Text annotations (`^"text"`, `_"text"`) | ✓ (v0.2.0) |
+| Rubato / cadenza (LP blocks + "サ" stencil) | ✓ (v0.2.0) |
 | Technical: harmonic, stopped, fingering → `Fr=` | ✓ (v0.2.0) |
 | Tuplets | `N[...]`; verify ratios |
 | Multi-bar rests | ✓ |
