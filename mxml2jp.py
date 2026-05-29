@@ -637,9 +637,10 @@ class MusicXmlParser:
 class JianpuGenerator:
     """Generate jianpu-ly text from parsed MusicXML."""
 
-    def __init__(self, prefer_major=True, verbose=False):
+    def __init__(self, prefer_major=True, verbose=False, octave_traditional=False):
         self.prefer_major = prefer_major
         self.verbose = verbose
+        self.octave_traditional = octave_traditional
         # Feature flags: enable incrementally for testing
         self.feat = {
             'slurs': True, 'ties': True, 'chords': True, 'grace': True,
@@ -666,7 +667,8 @@ class JianpuGenerator:
                 out.append('NextPart')
             if pname and pname.strip():
                 out.append(f"instrument={pname}")
-            out.append('OctavesBefore')  # required for unambiguous chord parsing
+            if not self.octave_traditional:
+                out.append('OctavesBefore')
 
             part_lines = self._generate_part(measures)
             out.extend(part_lines)
@@ -1018,7 +1020,13 @@ class JianpuGenerator:
             pref, _ = DUR_INFO.get(note['ntype'], ('', 0))
             is_long = note['ntype'] in ('half', 'whole', 'breve')
             dot_s = '' if is_long else '.' * note['dots']
-            token = pref + octave_marks + acc + str(degree) + dot_s
+            # Token: [duration][octave][accidental][degree][dots]
+            if self.octave_traditional:
+                low = ',' * octave_marks.count(',')
+                high = "'" * octave_marks.count("'")
+                token = pref + low + acc + str(degree) + high + dot_s
+            else:
+                token = pref + octave_marks + acc + str(degree) + dot_s
 
             # Extras (gated by feature flags)
             extras = []
@@ -1103,6 +1111,10 @@ class JianpuGenerator:
             note['step'], note['octave'], note['alter'], fifths, key_sig)
 
         pref, _ = DUR_INFO.get(note['ntype'], ('s', 0))
+        if self.octave_traditional:
+            low = ',' * octave_marks.count(',')
+            high = "'" * octave_marks.count("'")
+            return pref + low + acc + str(degree) + high
         return pref + octave_marks + acc + str(degree)
 
     def _format_chord_v2(self, chord_entries):
@@ -1121,8 +1133,12 @@ class JianpuGenerator:
 
         for token_str, cp in chord_entries:
             o, a, d, dp, dt = cp
-            # Format as: octave + acc + degree
-            pitch_parts.append(o + a + str(d))
+            if self.octave_traditional:
+                low = ',' * o.count(',')
+                high = "'" * o.count("'")
+                pitch_parts.append(low + a + str(d) + high)
+            else:
+                pitch_parts.append(o + a + str(d))
             if dp and not dur_pref:
                 dur_pref = dp
             if dt and not dot_s:
@@ -1144,12 +1160,12 @@ class JianpuGenerator:
 # Top-level conversion
 # ============================================================
 
-def musicxml_to_jianpu(xml_string, prefer_major=True, verbose=False):
+def musicxml_to_jianpu(xml_string, prefer_major=True, verbose=False, octave_traditional=False):
     """Convert MusicXML XML string to jianpu-ly input text."""
     parser = MusicXmlParser(prefer_major)
     title, composer, parts = parser.parse(xml_string)
 
-    gen = JianpuGenerator(prefer_major, verbose=verbose)
+    gen = JianpuGenerator(prefer_major, verbose=verbose, octave_traditional=octave_traditional)
     return gen.generate(title, composer, parts)
 
 
@@ -1192,6 +1208,8 @@ def main():
                     help='Assume minor keys (6=X instead of 1=X)')
     ap.add_argument('--verbose', '-v', action='store_true',
                     help='Verbose debug output')
+    ap.add_argument('--octave-traditional', action='store_true',
+                    help='Traditional octave style: low marks before digit, high marks after')
     args = ap.parse_args()
 
     try:
@@ -1205,7 +1223,8 @@ def main():
 
     try:
         result = musicxml_to_jianpu(xml_str, prefer_major=not args.minor,
-                                    verbose=args.verbose)
+                                    verbose=args.verbose,
+                                    octave_traditional=args.octave_traditional)
     except Exception as e:
         sys.stderr.write(f"Error converting: {e}\n")
         import traceback
