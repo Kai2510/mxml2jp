@@ -255,6 +255,8 @@ Apache 2.0
 - Trill extensions (`\startTrillSpan` / `\stopTrillSpan`) from `<wavy-line>`
 - Wedges / hairpins (`\<`, `\>`, `\!`) from `<wedge>` directions
 - Per-measure dynamics from `<direction><dynamics>` elements
+- Text annotations (`^"text"`, `_"text"`) from `<words>` elements
+- Rubato / cadenza detection: LP block with "サ" time sig stencil + barline style from MusicXML `<bar-style>`
 - Chinese instrument techniques via `Fr=` commands:
   - `<harmonic/>` → `Fr=harmonic` (natural harmonic)
   - `<harmonic><artificial/></harmonic>` → `Fr=◇`

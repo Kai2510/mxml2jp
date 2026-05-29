@@ -61,6 +61,12 @@ DYNAMICS = {
     'f', 'ff', 'fff', 'ffff', 'sf', 'sfz', 'fp', 'rfz',
 }
 
+BAR_STYLE_MAP = {
+    'regular': r'|',   'dashed': r'!',    'dotted': r';',
+    'heavy': r'.',     'light-light': r'||',  'light-heavy': r'|.',
+    'none': '',
+}
+
 ARTICS = {
     'staccato': r'Fr=▼', 'tenuto': r'Fr=_',
     'accent': r'Fr=>', 'marcato': r'\marcato',
@@ -285,6 +291,7 @@ class MusicXmlParser:
             'has_repeat_start': False,
             'has_repeat_end': False,
             'is_final': False,
+            'bar_style': None,     # barline style for rubato LP blocks
             'divisions': cur_divisions,
         }
 
@@ -364,8 +371,10 @@ class MusicXmlParser:
                     elif d == 'backward':
                         mdata['has_repeat_end'] = True
                 bs = child.find('bar-style')
-                if bs is not None and bs.text in ('light-light', 'light-heavy', 'final'):
-                    mdata['is_final'] = True
+                if bs is not None and bs.text:
+                    if bs.text in ('light-light', 'light-heavy', 'final'):
+                        mdata['is_final'] = True
+                    mdata['bar_style'] = bs.text
 
         return mdata
 
@@ -713,10 +722,12 @@ class JianpuGenerator:
                 lines.append(joined)
                 if mdata.get('has_repeat_end'):
                     lines.append('}')
-                # Emit dashed barline LP block if treated as rubato
+                # Emit barline LP block if treated as rubato
                 if treated_rubato:
-                    lines.append(r'LP: \bar "!"')
-                    lines.append(':LP')
+                    bar_cmd = BAR_STYLE_MAP.get(mdata.get('bar_style', ''), '!')
+                    if bar_cmd:
+                        lines.append(fr'LP: \bar "{bar_cmd}"')
+                        lines.append(':LP')
 
         # Flush remaining multirest
         if multirest_count > 0:
