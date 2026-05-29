@@ -640,6 +640,16 @@ class JianpuGenerator:
     def __init__(self, prefer_major=True, verbose=False):
         self.prefer_major = prefer_major
         self.verbose = verbose
+        # Feature flags: enable incrementally for testing
+        self.feat = {
+            'slurs': True, 'ties': True, 'chords': True, 'grace': True,
+            'articulations': True,   # Fr=▼/Fr=>/Fr=_ etc
+            'dynamics': True,        # per-note \p \f etc
+            'wedges': True,          # \< \> \!
+            'annotations': True,     # ^"...", _"..." 
+            'fr_technical': True,    # Fr=harmonic/◇/souyin
+            'tremolo': True, 'trill_span': True,
+        }
 
     def generate(self, title, composer, parts):
         """parts: list of (part_name, [measure_dict, ...])
@@ -806,8 +816,10 @@ class JianpuGenerator:
                 temp_mdata['notes'] = group
                 # Only emit per-measure directions/dynamics for the first group
                 if gi == 0:
-                    temp_dirs = list(mdata.get('directions', []))
-                    if mdata.get('dynamic'):
+                    temp_dirs = []
+                    if self.feat.get('wedges'):
+                        temp_dirs = list(mdata.get('directions', []))
+                    if self.feat.get('dynamics') and mdata.get('dynamic'):
                         temp_dirs.append(mdata['dynamic'])
                 else:
                     temp_dirs = []
@@ -819,8 +831,9 @@ class JianpuGenerator:
                     all_groups.append(mtokens)
 
             if all_groups:
-                for ann in mdata.get('annotations', []):
-                    lines.append(ann)
+                if self.feat.get('annotations'):
+                    for ann in mdata.get('annotations', []):
+                        lines.append(ann)
                 if mdata.get('has_repeat_start'):
                     lines.append('R{')
                     in_repeat = True
@@ -1007,33 +1020,39 @@ class JianpuGenerator:
             dot_s = '' if is_long else '.' * note['dots']
             token = pref + octave_marks + acc + str(degree) + dot_s
 
-            # Extras
+            # Extras (gated by feature flags)
             extras = []
-            for a in note.get('artic', []):
-                extras.append(a)
-            for f in note.get('fr_marks', []):
-                extras.append(f)
-            if note.get('dynamic'):
-                extras.append(note['dynamic'])
+            if self.feat.get('articulations'):
+                for a in note.get('artic', []):
+                    extras.append(a)
+            if self.feat.get('fr_technical'):
+                for f in note.get('fr_marks', []):
+                    extras.append(f)
+            if self.feat.get('dynamics'):
+                if note.get('dynamic'):
+                    extras.append(note['dynamic'])
             if extras:
                 token += ' ' + ' '.join(extras)
 
-            # Tremolo: append /// only for 3+ beams (jianpu supports only ///)
-            trem_beams = note.get('tremolo_beams', 0)
-            if trem_beams >= 3:
-                token += '///'
+            # Tremolo
+            if self.feat.get('tremolo'):
+                trem_beams = note.get('tremolo_beams', 0)
+                if trem_beams >= 3:
+                    token += '///'
 
-            # Slurs — separate tokens
+            # Slurs — gated
             prefix_tokens = []
             suffix_tokens = []
-            if note.get('slur_start'):
-                prefix_tokens.append('(')
-            if note.get('slur_stop'):
-                suffix_tokens.append(')')
+            if self.feat.get('slurs'):
+                if note.get('slur_start'):
+                    prefix_tokens.append('(')
+                if note.get('slur_stop'):
+                    suffix_tokens.append(')')
 
-            # Ties
-            if note.get('tie_stop') and not note.get('is_chord') and tokens:
-                tokens.append('~')
+            # Ties — gated
+            if self.feat.get('ties'):
+                if note.get('tie_stop') and not note.get('is_chord') and tokens:
+                    tokens.append('~')
 
             # Tuplets
             if note.get('tuplet_start') and note.get('tuplet_ratio'):
