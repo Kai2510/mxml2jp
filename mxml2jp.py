@@ -62,8 +62,8 @@ DYNAMICS = {
 }
 
 ARTICS = {
-    'staccato': r'\staccato', 'tenuto': r'\tenuto',
-    'accent': r'\accent', 'marcato': r'\marcato',
+    'staccato': r'Fr=▼', 'tenuto': r'Fr=_',
+    'accent': r'Fr=>', 'marcato': r'\marcato',
     'fermata': r'\fermata',
     'trill-mark': r'\trill', 'mordent': r'\mordent',
     'inverted-mordent': r'\mordent', 'turn': r'\turn',
@@ -74,22 +74,11 @@ ARTICS = {
     'down-bow': r'\downbow',
 }
 
-# Non-articulation notations that map to jianpu Fr= commands
-# Keys: MusicXML element tag inside <technical> or <articulations>
-# Values: Fr= argument string
-FR_MARKS = {
-    # <notations><technical><harmonic/></technical></notations>  → Fr=harmonic
-    # <notations><technical><stopped/></technical></notations>   → Fr=souyin
-    # <notations><technical><open/></technical></notations>     → Fr=0 (open string)
-}
 FR_TECHNICAL = {
-    'harmonic': 'harmonic',   # 自然泛音
-    'stopped': 'souyin',       # 顿弓 / 人工泛音
+    'stopped': 'souyin',       # 顿弓 / 闷音
     'open': '0',               # 空弦
     'snap-pizzicato': 'up',    # 左手拨弦 → ↗ 记号
 }
-
-# Fingering replacement text is handled inline
 
 # Duration type -> jianpu marker (prefix) and beam count
 DUR_INFO = {
@@ -291,6 +280,7 @@ class MusicXmlParser:
             'time_change': None,
             'tempo': None,
             'dynamic': None,
+            'directions': [],    # list of jianpu tokens for this measure (wedges, etc.)
             'has_repeat_start': False,
             'has_repeat_end': False,
             'is_final': False,
@@ -336,6 +326,17 @@ class MusicXmlParser:
                         for dtag in dyn:
                             if dtag.tag in DYNAMICS:
                                 mdata['dynamic'] = '\\' + dtag.tag
+
+                    # Wedges (crescendo / diminuendo)
+                    wedge = dt.find('wedge')
+                    if wedge is not None:
+                        wt = wedge.get('type', '')
+                        if wt == 'crescendo':
+                            mdata['directions'].append(r'\<')
+                        elif wt == 'diminuendo':
+                            mdata['directions'].append(r'\>')
+                        elif wt == 'stop':
+                            mdata['directions'].append(r'\!')
 
             elif tag == 'note':
                 note = self._parse_note(child)
@@ -441,7 +442,13 @@ class MusicXmlParser:
             tech_e = notations.find('technical')
             if tech_e is not None:
                 for t in tech_e:
-                    if t.tag in FR_TECHNICAL:
+                    if t.tag == 'harmonic':
+                        # Natural harmonic → \harmonic, artificial → Fr=◇
+                        if t.find('artificial') is not None:
+                            fr_marks.append(r'Fr=◇')   # 人工泛音
+                        else:
+                            artic.append(r'\harmonic')  # 自然泛音
+                    elif t.tag in FR_TECHNICAL:
                         fr_marks.append(f"Fr={FR_TECHNICAL[t.tag]}")
                     elif t.tag == 'fingering':
                         txt = (t.text or '').strip()
@@ -598,9 +605,10 @@ class JianpuGenerator:
                 cur_fifths = 0
                 self._cur_key_sig = get_key_sig_accidentals(0)
 
-            # Check for consecutive full-measure rests
+            # Check for consecutive full-measure rests (but only if no directions/wedges)
             notes = mdata.get('notes', [])
-            if self._is_whole_rest_measure(notes, mdata.get('time_change')):
+            has_dirs = bool(mdata.get('directions') or mdata.get('dynamic'))
+            if self._is_whole_rest_measure(notes, mdata.get('time_change')) and not has_dirs:
                 multirest_count += 1
                 continue
             elif multirest_count > 0:
@@ -646,7 +654,17 @@ class JianpuGenerator:
             for gi, group in enumerate(note_groups):
                 temp_mdata = dict(mdata)
                 temp_mdata['notes'] = group
+                # Only emit per-measure directions/dynamics for the first group
+                if gi == 0:
+                    temp_dirs = list(mdata.get('directions', []))
+                    if mdata.get('dynamic'):
+                        temp_dirs.append(mdata['dynamic'])
+                else:
+                    temp_dirs = []
+
                 mtokens = self._measure_tokens(temp_mdata, cur_fifths, cur_time)
+                if temp_dirs:
+                    mtokens = temp_dirs + mtokens
                 if mtokens:
                     all_groups.append(mtokens)
 
@@ -746,6 +764,8 @@ class JianpuGenerator:
         """Generate jianpu token list for one measure."""
         tokens = []
         key_sig = get_key_sig_accidentals(fifths)
+
+        chord_buffer = []
 
         chord_buffer = []  # list of (token_str, chord_parts)
         grace_before = []   # grace notes BEFORE the next real note

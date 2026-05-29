@@ -250,12 +250,15 @@ Apache 2.0
 - After-grace notes (`[...]g`) support
 - Tremolo (`///`) from MusicXML `<tremolo>` ornaments
 - Trill extensions (`\startTrillSpan` / `\stopTrillSpan`) from `<wavy-line>`
+- Wedges / hairpins (`\<`, `\>`, `\!`) from `<wedge>` directions
+- Per-measure dynamics from `<direction><dynamics>` elements
 - Chinese instrument techniques via `Fr=` commands:
   - `<harmonic/>` → `Fr=harmonic` (natural harmonic)
+  - `<harmonic><artificial/></harmonic>` → `Fr=◇`
   - `<stopped/>` → `Fr=souyin` (stopped note / 顿音)
   - `<fingering>` → `Fr=N` (fingering)
+- Articulations as Fr=: `staccato`→`Fr=▼`, `accent`→`Fr=>`, `tenuto`→`Fr=_`
 - New articulations: `\upbow`, `\downbow`, `\staccatissimo`
-- Grace notes: both before (`g[...]`) and after (`[...]g`)
 - Oversize measure auto-detection with corrected time signatures
 - `--verbose` mode for per-measure diagnostics
 - Token order: `[duration][octave][accidental][degree][dots]`

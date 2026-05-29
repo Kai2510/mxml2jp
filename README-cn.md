@@ -253,12 +253,15 @@ Apache 2.0
 - 后倚音（`[...]g`）支持
 - 震音（`///`），从 MusicXML `<tremolo>` 装饰音读取
 - 颤音延长（`\startTrillSpan` / `\stopTrillSpan`），从 `<wavy-line>` 读取
+- 渐强/渐弱（`\<`、`\>`、`\!`），从 `<wedge>` 方向标记读取
+- 小节级力度记号，从 `<direction><dynamics>` 读取
 - 中国乐器技法通过 `Fr=` 命令映射：
-  - `<harmonic/>` → `Fr=harmonic`（自然泛音）
+  - `<harmonic/>` → `\harmonic`（自然泛音）
+  - `<harmonic><artificial/></harmonic>` → `Fr=◇`（人工泛音）
   - `<stopped/>` → `Fr=souyin`（顿音）
   - `<fingering>` → `Fr=N`（指法）
+- 演奏记号改用 Fr=：`staccato`→`Fr=▼`、`accent`→`Fr=>`、`tenuto`→`Fr=_`
 - 新增演奏记号：`\upbow`、`\downbow`、`\staccatissimo`
-- 倚音：前倚音（`g[...]`）与后倚音（`[...]g`）均支持
 - 超小节自动检测并修正拍号
 - `--verbose` 模式逐小节诊断输出
 - Token 书写顺序：`[时值][八度][变音][唱名][附点]`
