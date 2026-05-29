@@ -78,12 +78,9 @@ ARTICS = {
     'strong-accent': r'\accent',
     'up-bow': r'\upbow',
     'down-bow': r'\downbow',
-    'breath-mark': r'\breathe',
-    'spiccato': r'\staccato',
-    'doit': r'\bendAfter #4',
-    'falloff': r'\bendAfter #-4',
-    'plop': r'\bendAfter #-2',
-    'scoop': r'\bendAfter #2',
+    # Multi-arg commands like \bendAfter #4 don't work in jianpu (split tokens)
+    # 'doit': 'skip', 'falloff': 'skip', 'plop': 'skip', 'scoop': 'skip',
+    # \breathe also may cause issues with placement
 }
 
 FR_TECHNICAL = {
@@ -659,6 +656,7 @@ class JianpuGenerator:
                 out.append('NextPart')
             if pname and pname.strip():
                 out.append(f"instrument={pname}")
+            out.append('OctavesBefore')  # resolve chord octave ambiguity
 
             part_lines = self._generate_part(measures)
             out.extend(part_lines)
@@ -685,6 +683,7 @@ class JianpuGenerator:
         cur_time = (4, 4)
         tempo_emitted = False
         multirest_count = 0
+        in_repeat = False  # track repeat nesting
 
         for mdata in measures:
             # Handle key change
@@ -742,22 +741,29 @@ class JianpuGenerator:
             total_q = sum(n.get('duration', 0) for n in raw_notes
                         if not n.get('is_grace') and not n.get('is_measure_rest')
                         and not n.get('is_chord')) / float(divs)
-            # Also compute jianpu-style total (type-based, for barcheck matching)
+            # Also compute jianpu-style total to catch type-based mismatches
             jp_total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
                            for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')
                            and not n.get('is_chord')) / 16.0
-            # Use the larger value for time sig computation
             total_q = max(total_q, jp_total_q)
             expected_q = cur_time[0] * 4.0 / cur_time[1]
 
-            # Detect tuplet presence for precision padding
+            # Detect tuplet presence — replace tuplet measures with rest
             has_tuplet = any(n.get('tuplet_ratio') for n in raw_notes)
+
+            if has_tuplet and total_q > expected_q + 0.005:
+                bt, bt_type = self._best_timesig(total_q)
+                sys.stderr.write(
+                    f"WARNING: M{mdata.get('number', '?')}: tuplet measure "
+                    f"({total_q:.2f}Q vs {expected_q:.1f}Q) → replaced with rest ({bt}/{bt_type}). "
+                    f"Fill manually.\n")
+                cur_time = (bt, bt_type)
+                lines.append(f"{bt}/{bt_type}")
+                lines.append('R*1')
+                continue  # skip normal processing
 
             if total_q > expected_q + 0.01:
                 bt, bt_type = self._best_timesig(total_q)
-                # Add extra beat for tuplet-heavy measures (jianpu rounding)
-                if has_tuplet:
-                    bt += 1
                 margin = total_q - expected_q
                 if is_rubato or margin >= 4.0:
                     treated_rubato = True
@@ -813,17 +819,16 @@ class JianpuGenerator:
                     all_groups.append(mtokens)
 
             if all_groups:
-                # Emit annotations (text markup) at the start of the measure
                 for ann in mdata.get('annotations', []):
                     lines.append(ann)
-                # Emit repeat marks
                 if mdata.get('has_repeat_start'):
                     lines.append('R{')
-                # Join sub-bar token groups with '|'
+                    in_repeat = True
                 joined = ' | '.join(' '.join(g) for g in all_groups)
                 lines.append(joined)
-                if mdata.get('has_repeat_end'):
+                if mdata.get('has_repeat_end') and in_repeat:
                     lines.append('}')
+                    in_repeat = False
                 # Emit barline LP block if treated as rubato
                 if treated_rubato:
                     bar_cmd = BAR_STYLE_MAP.get(mdata.get('bar_style', ''), '!')
@@ -1013,10 +1018,10 @@ class JianpuGenerator:
             if extras:
                 token += ' ' + ' '.join(extras)
 
-            # Tremolo: append /// after the note token
+            # Tremolo: append /// only for 3+ beams (jianpu supports only ///)
             trem_beams = note.get('tremolo_beams', 0)
-            if trem_beams > 0:
-                token += '/' * trem_beams
+            if trem_beams >= 3:
+                token += '///'
 
             # Slurs — separate tokens
             prefix_tokens = []
