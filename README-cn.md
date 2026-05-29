@@ -1,287 +1,124 @@
-# mxml2jp — MusicXML 转 jianpu-ly 转换器
+# mxml2jp v0.3.0 — MusicXML 转 jianpu-ly 转换器
 
-将 MusicXML 文件（`.xml`, `.musicxml`, `.mxl`）转换为
-[jianpu-ly](https://ssb22.user.srcf.net/mwrhome/jianpu-ly.html) 的纯文本输入。
+将 MusicXML 文件转换为 [jianpu-ly](https://ssb22.user.srcf.net/mwrhome/jianpu-ly.html) 的纯文本输入。
 
 ## 快速开始
 
 ```sh
 python mxml2jp.py 乐谱.musicxml -o 乐谱.txt
-python mxml2jp.py 乐谱.xml
-
-# verbose 调试模式：
-python mxml2jp.py 乐谱.musicxml -v -o 乐谱.txt
-
-# 小调记谱（6=X 而非 1=X）：
-python mxml2jp.py 乐谱.xml --minor
+python mxml2jp.py 乐谱.xml --octave-traditional
+python mxml2jp.py 乐谱.mxl -v -o 乐谱.txt
 ```
 
-用 jianpu-ly 编译输出文件：
+用 jianpu-ly 和 LilyPond 编译：
 
 ```sh
-# PowerShell
 $env:j2ly_sloppy_bars=1
 python jianpu-ly.py 乐谱.txt > 乐谱.ly
 lilypond 乐谱.ly
 ```
-
-## 功能
-
-- 读取 MuseScore 4+、Sibelius、PhotoScore 等导出的 partwise MusicXML
-- 固定调音高 → 首调简谱转换（1=主音）
-- 处理调号、拍号、多声部（`NextPart`）
-- 保留连线（~）、圆滑线（( )）、力度记号、演奏记号
-- 连续整小节休止合并为 `R*N`
-- 支持倚音（`g[...]`）、连音（`N[...]`）、和弦
-- **超小节自动修正**：若 MusicXML 某 `<measure>` 内含音符数量超过声明拍号
-  （MuseScore 导出常见问题），转换器会自动计算正确拍号并写入输出，同时在
-  stderr 输出警告
-- **`--verbose`** 模式逐小节打印诊断信息
-- **`--minor`** 标志支持小调记谱
-
-## 局限性
-
-- 倚音：仅支持前倚音（`g[...]`），后倚音（`[...]g`）尚未区分
-- 连音：以裸 `N[...]` 形式输出，需人工核对比例
-- 同乐器内的多声部不拆分（请在 MusicXML 中用独立声部）
-- 震音、八度记号、排练记号、表情文字不做映射
-- 转换结果为**半成品**，需人工润色
-
----
-
-## 实现细节
-
-### 架构
-
-```
-MusicXML 文件
-     │
-     ▼
-MusicXmlParser.parse()
-     │  ┌─── 提取元数据（title, composer, part names）
-     │  ├─── 遍历每个 <part>：
-     │  │      ├── 逐小节解析（<attributes>, <note>, <direction>, <barline>）
-     │  │      │      └── note dict: {step, octave, alter, ntype, dots, tie, slur, ...}
-     │  │      └── 检测 key_change / time_change / oversize
-     │  └── 返回 (title, composer, [(part_name, [measure_dict])])
-     │
-     ▼
-JianpuGenerator.generate()
-     │  ├── 输出 title=, composer=, instrument=, NextPart
-     │  ├── 逐小节处理：
-     │  │      ├── note_to_jianpu()     ── 音高转换
-     │  │      ├── _measure_tokens()    ── jianpu token 拼装
-     │  │      ├── _split_notes()       ── 超小节拆分
-     │  │      └── _best_timesig()      ── 超小节修正拍号
-     │  └── 输出 jianpu-ly 文本行
-     │
-     ▼
-jianpu-ly 输入文本（.txt 纯文本）
-```
-
-### 固定调 → 首调转换算法
-
-这是核心算法——将绝对音名（C, D, E...）转换为 jianpu 的唱名（1-7），
-附带八度记号（, / '）和变音记号（# / b）。
-
-**算法流程**（`note_to_jianpu` 函数）：
-
-1. **确定主音音名**（从 `fifths` 即五度圈索引计算）：
-   ```
-   tonic_step_idx = (fifths × 4) % 7    # 例如 fifths=1 → tonic=G
-   ```
-
-2. **计算音级距离**（以八度4为基准）：
-   ```
-   dTone = step_idx - tonic_step_idx
-   如果 step_idx < tonic_step_idx: dTone += 7    # 向前绕回
-   dTone += 7 × (octave - 4)                       # 八度偏移
-   ```
-
-3. **得出唱名和八度记号**：
-   ```
-   degree = dTone % 7 + 1        # 1-7
-   八度数 = dTone // 7
-   正数 → ' 记号，负数 → , 记号
-   ```
-
-4. **变音记号判定**——比较音符的实际半音高度与调号默认值：
-   ```
-   key_step_acc = 调号对该音名的升降（+1=升, -1=降, 0=自然）
-   eff = alter_val（若MusicXML有 <alter>）否则 key_step_acc
-
-   如果 key_step_acc ≠ 0:
-       若 eff == key_step_acc: acc = ''       # 与调号一致，不写记号
-       若 eff == 0:   acc = 'b'（若调号是升）或 '#'（若调号是降）
-       否则:           acc = '#'（若 eff>0）或 'b'（若 eff<0）
-   否则（该音在调内是自然音）:
-       acc = ''（若 eff==0）否则 '#'/`b'
-   ```
-
-**举例**：G 大调（fifths=1, 主音=G），音符 F4（step=F, octave=4）
-- G 大调中 F 需升 → `key_step_acc = +1`
-- MusicXML 无 `<alter>` 元素 → `eff = +1`（继承调号）
-- `eff == key_step_acc` → `acc = ''`
-- `dTone = 3-4+7 = 6` → `degree = 7`
-- 结果：`7`（无变音记号，无八度记号）
-
-**举例**：G 大调，音符 F♮4（还原号 `<accidental>natural</accidental>`）
-- `key_step_acc = +1`, `eff = 0`（还原号强制为自然）
-- `eff ≠ key_step_acc` 且 `eff == 0` → `acc = 'b'`（比调号预期低半音）
-- 结果：`b7`（G 大调中的降7级 = F♮）
-
-### Token 书写顺序
-
-每个 jianpu token 的格式为：
-```
-[时值前缀][八度记号][变音记号][唱名][附点]
-```
-示例：`q,4`（八分音符、低八度、4 级）、`s'#5`（十六分音符、高八度、升 5 级）、
-`1.`（附点四分音符、1 级）。
-
-时值前缀：`h`（64分）、`d`（32分）、`s`（16分）、`q`（8分）、
-`""`（四分音符及以上为空白）。
-
-对于二分/全音/倍全音符，附点**不写在主音符上**，而是吸收进增时线。
-例如：`1 - -` = 附点二分音符（3 拍），而非 `1. - -`。
-
-圆滑线 `(` `)` 和延音线 `~` 作为**独立 token** 输出（以空格分隔），
-绝不粘连到音符上。这样可以避免 jianpu-ly 的 "Unrecognised command" 错误。
-
-和弦的书写规则：将各音高成分首尾相连。例如 `,135'` 表示三个音
-（低八度1、自然八度3、高八度5），前面加时值前缀：`s,135'` = 十六分和弦。
-
-### 超小节处理（散板自动修正）
-
-当 MusicXML 某个 `<measure>` 内含音符总时长超过当前拍号允许值
-（MuseScore 导出的常见问题，如 cadenza 段落），转换器会：
-
-1. 从各音符的 `<type>` + `<dot>` 累加计算实际时值（以四分音符为单位）
-2. 与当前拍号的预期时值比较
-3. 如果超出：
-   - 调用 `_best_timesig()` 计算最佳拍号：
-     - 依次用 `/4`、`/8`、`/16` 做分母，找精确匹配或最接近的分数
-     - 例如：14.0Q → `14/4`, 4.5Q → `9/8`, 2.8Q → `11/16`
-   - 在 stderr 输出 **WARNING**，注明小节号
-   - 若偏差 ≤ 2 拍，额外提示 **"possible input error?"**
-   - 在输出文本中插入修正后的拍号，并更新后续小节的 `cur_time`
-
-### 倚音
-
-MusicXML 的倚音被收集为 `g[...]` 语法：
-```
-g[#45] 1    — 两个倚音（升4、5），后面是主音 1
-g[s'6q5] 1  — 带时值的倚音（16分高6、8分5）
-```
-
-目前仅支持前倚音。后倚音（`[...]g`）尚未区分处理。
-
-### 连音（三连音等）
-
-连音使用 jianpu 的 `N[...]` 语法：
-```
-3[ q1 q1 q1 ]         — 三连音（三个八分音符占两拍）
-6[ s1 s2 s3 s4 s5 s6 ] — 六连音
-```
-
-括号数字取自 MusicXML 的 `<time-modification>` 中的 `<actual-notes>` 值。
-
-### 多小节休止压缩
-
-连续的整小节休止合并为 `R*N`：
-```
-R*5            — 5 小节休止
-0 - - -        — 单小节全休止（4/4拍）
-```
-
----
 
 ## 命令行选项
 
 | 选项 | 说明 |
 |------|------|
 | `-o FILE` | 输出文件（默认 stdout） |
-| `--minor` | 小调记谱（`6=X` 替代 `1=X`） |
-| `--verbose` / `-v` | 逐小节诊断输出（stderr） |
+| `--minor` | 小调记谱（`6=X`） |
+| `--verbose` / `-v` | 每小节诊断信息输出到 stderr |
+| `--octave-traditional` | 传统八度标记：低音在数字前，高音在数字后 |
 
----
+## 架构
 
-## 环境变量
+```
+MusicXML → MusicXmlParser.parse()
+  ├── 提取元数据（title, composer, part-list）
+  ├── 逐声部解析（<part> → <measure> → <note>/<direction>/<barline>）
+  │     └── 中音备份/前进 → 和弦合并
+  └── 返回 (title, composer, [(声部名, [小节数据])])
 
-| 变量 | 用途 |
-|------|------|
-| `j2ly_sloppy_bars` | 设为 `1` 后，jianpu-ly 的 barcheck 从致命错误降为警告 |
-| `j2ly_staff_size` | 五线谱尺寸（默认 20） |
-| `j2ly_lyric_size` | 歌词字号（默认取 `staff_size`） |
+小节数据 → JianpuGenerator.generate()
+  ├── 输出 title=, composer=, instrument=, NextPart, OctavesBefore
+  ├── 逐小节：
+  │     ├── note_to_jianpu()  — 固定调→首调转换
+  │     ├── 超小节检测        — 散板/自由节奏处理
+  │     └── 连音小节          — 替换为休止符 + 用户警告
+  └── 输出 jianpu-ly 文本行
+```
 
----
+## 核心算法：固定调 → 首调
+
+```
+1. 从 fifths 确定主音：tonic_step = (fifths × 4) % 7
+2. 计算音级距离：dTone = step_idx - tonic_step_idx（必要时 +7）
+3. 唱名与八度：degree = dTone % 7 + 1，八度数 = dTone // 7
+4. 变音记号：比较实际半音高度与调号默认值
+```
+
+## 超小节 / 散板处理
+
+| 情形 | 处理方式 |
+|------|---------|
+| 偏差 ≥ 4 拍 | LP 块替代拍号模板为 "サ" + 修正后的拍号 |
+| 偏差 < 4 拍 | 修正拍号，警告用户 |
+| 连音小节 | 替换为 `R*1`，警告用户 |
+| 显式 `<time>` 元素 | 总是发出（散板后恢复拍号） |
+
+## 已知局限
+
+- **多声部对齐**：多个声部同谱时，散板休止长度可能不同步
+- **连音精度**：jianpu-ly 使用基于类型的计时，连音密集的小节替换为休止
+- **Sibelius 导出的中文**：可能需要用 MuseScore 重新导出以确保 UTF-8 编码
+- **草原小姐妹**：Sibelius 导出的中文文本编码问题；可通过手动 lilypond 编译生成 PDF
+
+## TODO
+
+- 多声部散板小节对齐
+- 使用 MusicXML `<duration>` divisions 计算连音时长
+- 排练记号、八度记号、表情文字
+- `.mxl` 压缩格式支持
 
 ## 支持的 MusicXML 元素
 
 | 元素 | 支持程度 |
 |------|---------|
-| `<pitch>` 含 `<alter>` | ✓ |
-| `<accidental>`（升/降/还原） | ✓ |
-| 调号 (`<fifths>`) | ✓ |
-| 拍号 | ✓ |
-| 速度 (`<metronome>`) | ✓ |
-| 力度 (`p/mp/mf/f/ff/...`) | ✓ |
-| 演奏记号（断奏、保持音、重音） | ✓ |
-| 上弓 / 下弓 (`\upbow`/`\downbow`) | ✓ (v0.2.0) |
-| 强断音 (`\staccatissimo`) | ✓ (v0.2.0) |
-| 延长音 (fermata) | ✓ |
-| 延音线 (`<tied>`) | ✓ |
-| 圆滑线 | ✓ |
-| 和弦 (`<chord/>`) | ✓ |
-| 倚音（前倚音 + 后倚音） | ✓ (v0.2.0) |
-| 震音 (`///`) | ✓ (v0.2.0) |
-| 颤音延长 (`\startTrillSpan`/`\stopTrillSpan`) | ✓ (v0.2.0) |
-| 渐强/渐弱 (`\<`, `\>`, `\!`) | ✓ (v0.2.0) |
-| 文字标注 (`^"text"`, `_"text"`) | ✓ (v0.2.0) |
-| 散板/cadenza（LP块 + "サ" 拍号替换 + 虚线小节线） | ✓ (v0.2.0) |
-| 技法: 泛音、顿音、指法 → `Fr=` | ✓ (v0.2.0) |
-| 连音 (tuplet) | `N[...]`；需核对比例 |
+| 音高（含 `<alter>`） | ✓ |
+| 调号 / 拍号 | ✓ |
+| 速度（`<metronome>`） | ✓ |
+| 力度（p/mp/f/ff…） | ✓ |
+| 渐强渐弱（`\<`, `\>`, `\!`） | ✓ |
+| 文字标注（`^"…"`, `_"…"`） | ✓ |
+| 演奏记号（断奏→Fr=▼, 重音→Fr=>, 保持音→Fr=_） | ✓ |
+| 圆滑线 / 延音线 | ✓ |
+| 和弦（`<chord/>`） | ✓ |
+| 倚音（前 + 后） | ✓ |
+| 震音（`///`） | ✓ |
+| 颤音延长（`\startTrillSpan`/`\stopTrillSpan`） | ✓ |
+| 技法：泛音、顿音、指法 → `Fr=` | ✓ |
+| 连音（`N[…]`） | 替换为休止 + 警告 |
 | 多小节休止 | ✓ |
+| 备份 / 前进 | 合并为和弦 |
+
+## 更新日志
+
+### v0.3.0
+- `--octave-traditional` 选项
+- 连音替换：`R*1` 不改变拍号
+- `read_input()` UTF-8/GBK fallback 编码
+- 休止符/节奏符不用 `-`，用显式 `0 0 0` token
+- 散板后拍号总是恢复
+
+### v0.2.1
+- 特征开关（`self.feat`），逐步编译测试
+- 渐强渐弱、力度、标注、Fr= 技法
+- `\bendAfter` 移除（多 token 不兼容）
+
+### v0.2.0
+- 后倚音、震音、颤音延长、Fr= 映射
+- 超小节自动检测
+
+### v0.1.0
+- 初始发布
 
 ## 许可
 
 Apache 2.0
-
----
-
-## 更新日志
-
-### v0.2.1
-
-- **多声部支持**：`<backup>`/`<forward>` 元素已处理；
-  同位置音符自动合并为和弦
-- `\prall`（逆波音）、`\breathe`（换气）、`\flageolet`（自然泛音）
-- `\stopped`（右手拨弦）、`\snappizzicato`（左手拨弦）、`\open`（空弦）
-- 弯音记号：`\bendAfter #4`（上滑）、`\bendAfter #-4`（下滑）
-- 散板小节线根据 MusicXML `<bar-style>` 决定
-- **已知局限**：超小节（如一小节含14拍）转换器会修正拍号，
-  但连音时长若有累积舍入误差，可能仍使 barcheck 有微小偏差。
-  请在 jianpu-ly 编译时检查标注的小节并手动调整。
-
-### v0.2.0
-
-- 后倚音（`[...]g`）支持
-- 震音（`///`），从 MusicXML `<tremolo>` 装饰音读取
-- 颤音延长（`\startTrillSpan` / `\stopTrillSpan`），从 `<wavy-line>` 读取
-- 渐强/渐弱（`\<`、`\>`、`\!`），从 `<wedge>` 方向标记读取
-- 小节级力度记号，从 `<direction><dynamics>` 读取
-- 中国乐器技法通过 `Fr=` 命令映射：
-  - `<harmonic/>` → `\harmonic`（自然泛音）
-  - `<harmonic><artificial/></harmonic>` → `Fr=◇`（人工泛音）
-  - `<stopped/>` → `Fr=souyin`（顿音）
-  - `<fingering>` → `Fr=N`（指法）
-- 演奏记号改用 Fr=：`staccato`→`Fr=▼`、`accent`→`Fr=>`、`tenuto`→`Fr=_`
-- 新增演奏记号：`\upbow`、`\downbow`、`\staccatissimo`
-- 超小节自动检测并修正拍号
-- `--verbose` 模式逐小节诊断输出
-- Token 书写顺序：`[时值][八度][变音][唱名][附点]`
-- 圆滑线与延音线作为独立空格分隔 token
-
-### v0.1.0
-
-- 初始发布
