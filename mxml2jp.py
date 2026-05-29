@@ -72,18 +72,33 @@ ARTICS = {
     'accent': r'Fr=>', 'marcato': r'\marcato',
     'fermata': r'\fermata',
     'trill-mark': r'\trill', 'mordent': r'\mordent',
-    'inverted-mordent': r'\mordent', 'turn': r'\turn',
+    'inverted-mordent': r'\prall', 'turn': r'\turn',
     # v0.2.0 additions
     'staccatissimo': r'\staccatissimo',
     'strong-accent': r'\accent',
     'up-bow': r'\upbow',
     'down-bow': r'\downbow',
+    'breath-mark': r'\breathe',
+    'spiccato': r'\staccato',
+    'doit': r'\bendAfter #4',
+    'falloff': r'\bendAfter #-4',
+    'plop': r'\bendAfter #-2',
+    'scoop': r'\bendAfter #2',
 }
 
 FR_TECHNICAL = {
     'stopped': '▼',            # 顿音 → same as staccato
-    'open': '0',               # 空弦
+    'open': '0',               # 空弦 → Fr=0
     'snap-pizzicato': 'up',    # 左手拨弦 → ↗
+    'up-bow': None,            # handled in ARTICS (→ \upbow)
+    'down-bow': None,          # handled in ARTICS (→ \downbow)
+}
+
+# One-word LilyPond \commands for technical elements (passed through by jianpu-ly)
+LP_TECHNICAL = {
+    'harmonic': r'\flageolet',     # natural harmonic (or \harmonic in jianpu)
+    'open': r'\open',              # open string
+    'snap-pizzicato': r'\snappizzicato',  # snap / bartok pizz
 }
 
 # Duration type -> jianpu marker (prefix) and beam count
@@ -464,11 +479,11 @@ class MusicXmlParser:
             if tech_e is not None:
                 for t in tech_e:
                     if t.tag == 'harmonic':
-                        # Natural harmonic → \harmonic, artificial → Fr=◇
+                        # Natural harmonic → \flageolet, artificial → Fr=◇
                         if t.find('artificial') is not None:
-                            fr_marks.append(r'Fr=◇')   # 人工泛音
+                            fr_marks.append(r'Fr=◇')       # 人工泛音
                         else:
-                            artic.append(r'\harmonic')  # 自然泛音
+                            artic.append(r'\flageolet')     # 自然泛音
                     elif t.tag in FR_TECHNICAL:
                         fr_marks.append(f"Fr={FR_TECHNICAL[t.tag]}")
                     elif t.tag == 'fingering':
