@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-mxml2jp.py v0.2.0 — Convert MusicXML to jianpu-ly input format
+mxml2jp.py v0.2.1 — Convert MusicXML to jianpu-ly input format
 
 home: E:\USTC\NMOU\mxml2jp\
 depends: jianpu-ly v1.866+ (https://github.com/ssb22/jianpu-ly)
@@ -1063,7 +1063,7 @@ def read_input(path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='mxml2jp v0.2.0 — Convert MusicXML to jianpu-ly input text',
+        description='mxml2jp v0.2.1 — Convert MusicXML to jianpu-ly input text',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   python mxml2jp.py piece.musicxml -o piece.txt

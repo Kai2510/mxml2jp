@@ -248,6 +248,13 @@ Apache 2.0
 
 ## Changelog
 
+### v0.2.1
+
+- `\prall` (inverted mordent), `\breathe` (breath mark), `\flageolet` (natural harmonic)
+- `\stopped` (right-hand pizz), `\snappizzicato` (snap pizz), `\open` (open string)
+- Bend articulations: `\bendAfter #4` (doit), `\bendAfter #-4` (falloff)
+- Rubato barline style from MusicXML `<bar-style>` (dashed/regular/dotted/etc.)
+
 ### v0.2.0
 
 - After-grace notes (`[...]g`) support

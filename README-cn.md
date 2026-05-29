@@ -251,6 +251,13 @@ Apache 2.0
 
 ## 更新日志
 
+### v0.2.1
+
+- `\prall`（逆波音）、`\breathe`（换气）、`\flageolet`（自然泛音）
+- `\stopped`（右手拨弦）、`\snappizzicato`（左手拨弦）、`\open`（空弦）
+- 弯音记号：`\bendAfter #4`（上滑）、`\bendAfter #-4`（下滑）
+- 散板小节线根据 MusicXML `<bar-style>` 决定（虚线/实线/点线等）
+
 ### v0.2.0
 
 - 后倚音（`[...]g`）支持
