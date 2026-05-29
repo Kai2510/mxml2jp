@@ -250,10 +250,15 @@ Apache 2.0
 
 ### v0.2.1
 
+- **Multi-voice support**: `<backup>`/`<forward>` elements now handled;
+  simultaneous notes at the same position merged into chords
 - `\prall` (inverted mordent), `\breathe` (breath mark), `\flageolet` (natural harmonic)
 - `\stopped` (right-hand pizz), `\snappizzicato` (snap pizz), `\open` (open string)
 - Bend articulations: `\bendAfter #4` (doit), `\bendAfter #-4` (falloff)
-- Rubato barline style from MusicXML `<bar-style>` (dashed/regular/dotted/etc.)
+- Rubato barline style from MusicXML `<bar-style>`
+- **Known limitation**: oversize measures (e.g., 14Q in one bar) are corrected
+  by overriding time signatures, but tuplet rounding may still cause minor
+  barcheck deviations. Check flagged measures manually.
 
 ### v0.2.0
 

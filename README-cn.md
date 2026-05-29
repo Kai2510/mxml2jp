@@ -253,10 +253,15 @@ Apache 2.0
 
 ### v0.2.1
 
+- **多声部支持**：`<backup>`/`<forward>` 元素已处理；
+  同位置音符自动合并为和弦
 - `\prall`（逆波音）、`\breathe`（换气）、`\flageolet`（自然泛音）
 - `\stopped`（右手拨弦）、`\snappizzicato`（左手拨弦）、`\open`（空弦）
 - 弯音记号：`\bendAfter #4`（上滑）、`\bendAfter #-4`（下滑）
-- 散板小节线根据 MusicXML `<bar-style>` 决定（虚线/实线/点线等）
+- 散板小节线根据 MusicXML `<bar-style>` 决定
+- **已知局限**：超小节（如一小节含14拍）转换器会修正拍号，
+  但连音时长若有累积舍入误差，可能仍使 barcheck 有微小偏差。
+  请在 jianpu-ly 编译时检查标注的小节并手动调整。
 
 ### v0.2.0
 

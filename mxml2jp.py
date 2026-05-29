@@ -298,7 +298,7 @@ class MusicXmlParser:
 
     def _parse_measure(self, m_elem, cur_fifths, cur_time, cur_divisions,
                        part_key_seen, part_time_seen):
-        """Parse one <measure> element."""
+        """Parse one <measure> element, handling multi-voice via backup/forward."""
         mdata = {
             'number': int(m_elem.get('number', '0')),
             'notes': [],
@@ -306,14 +306,18 @@ class MusicXmlParser:
             'time_change': None,
             'tempo': None,
             'dynamic': None,
-            'directions': [],    # list of jianpu tokens (wedges, dynamics, text)
-            'annotations': [],   # text markup tokens: ^"..." or _"..."
+            'directions': [],
+            'annotations': [],
             'has_repeat_start': False,
             'has_repeat_end': False,
             'is_final': False,
-            'bar_style': None,     # barline style for rubato LP blocks
+            'bar_style': None,
             'divisions': cur_divisions,
         }
+
+        # Multi-voice tracking
+        current_voice = 1
+        voice_starts = {1: 0}   # voice → start position in divisions
 
         for child in m_elem:
             tag = child.tag
@@ -337,64 +341,130 @@ class MusicXmlParser:
                     mdata['divisions'] = int(div_e.text)
 
             elif tag == 'direction':
-                for dt in child.findall('direction-type'):
-                    # Metronome
-                    met = dt.find('metronome')
-                    if met is not None:
-                        bu = met.find('beat-unit')
-                        pm = met.find('per-minute')
-                        if bu is not None and pm is not None:
-                            unit = {'quarter': '4', 'eighth': '8',
-                                    'half': '2', '16th': '16'}.get(bu.text, '4')
-                            mdata['tempo'] = f"{unit}={pm.text}"
+                self._parse_direction_elem(child, mdata)
 
-                    # Dynamics
-                    dyn = dt.find('dynamics')
-                    if dyn is not None:
-                        for dtag in dyn:
-                            if dtag.tag in DYNAMICS:
-                                mdata['dynamic'] = '\\' + dtag.tag
+            elif tag == 'backup':
+                bk_dur = int(child.findtext('duration', '0'))
+                current_voice += 1
+                # Find which position we're backing up to: the END of voice 1
+                # minus the backup duration = start of the overlapping section
+                v1_start = voice_starts.get(1, 0)
+                if current_voice not in voice_starts:
+                    voice_starts[current_voice] = max(0, v1_start - bk_dur)
 
-                    # Wedges (crescendo / diminuendo)
-                    wedge = dt.find('wedge')
-                    if wedge is not None:
-                        wt = wedge.get('type', '')
-                        if wt == 'crescendo':
-                            mdata['directions'].append(r'\<')
-                        elif wt == 'diminuendo':
-                            mdata['directions'].append(r'\>')
-                        elif wt == 'stop':
-                            mdata['directions'].append(r'\!')
-
-                    # Text annotations (words → ^"text" / _"text")
-                    words = dt.find('words')
-                    if words is not None and words.text:
-                        txt = words.text.strip().replace('"', "'")
-                        if txt:
-                            placement = child.get('placement', 'above')
-                            if placement == 'below':
-                                mdata['annotations'].append(f'_{chr(34)}{txt}{chr(34)}')
-                            else:
-                                mdata['annotations'].append(f'^{chr(34)}{txt}{chr(34)}')
+            elif tag == 'forward':
+                fw_dur = int(child.findtext('duration', '0'))
+                voice_starts[current_voice] = voice_starts.get(current_voice, 0) + fw_dur
 
             elif tag == 'note':
                 note = self._parse_note(child)
                 if note:
+                    # Assign to current voice and track position
+                    note['_voice'] = current_voice
+                    note['_start'] = voice_starts.get(current_voice, 0)
+                    dur = int(child.findtext('duration', '0'))
+                    voice_starts[current_voice] = note['_start'] + dur
                     mdata['notes'].append(note)
 
             elif tag == 'barline':
-                rp = child.find('repeat')
-                if rp is not None:
-                    d = rp.get('direction', '')
-                    if d == 'forward':
-                        mdata['has_repeat_start'] = True
-                    elif d == 'backward':
-                        mdata['has_repeat_end'] = True
-                bs = child.find('bar-style')
-                if bs is not None and bs.text:
-                    if bs.text in ('light-light', 'light-heavy', 'final'):
-                        mdata['is_final'] = True
-                    mdata['bar_style'] = bs.text
+                self._parse_barline_elem(child, mdata)
+
+        # Post-process: merge aligned notes into chords
+        mdata['notes'] = self._merge_aligned_notes(mdata['notes'])
+
+        return mdata
+
+    def _parse_direction_elem(self, child, mdata):
+        """Parse a <direction> element (refactored from _parse_measure)."""
+        for dt in child.findall('direction-type'):
+            met = dt.find('metronome')
+            if met is not None:
+                bu = met.find('beat-unit')
+                pm = met.find('per-minute')
+                if bu is not None and pm is not None:
+                    unit = {'quarter': '4', 'eighth': '8',
+                            'half': '2', '16th': '16'}.get(bu.text, '4')
+                    mdata['tempo'] = f"{unit}={pm.text}"
+
+            dyn = dt.find('dynamics')
+            if dyn is not None:
+                for dtag in dyn:
+                    if dtag.tag in DYNAMICS:
+                        mdata['dynamic'] = '\\' + dtag.tag
+
+            wedge = dt.find('wedge')
+            if wedge is not None:
+                wt = wedge.get('type', '')
+                if wt == 'crescendo':
+                    mdata['directions'].append(r'\<')
+                elif wt == 'diminuendo':
+                    mdata['directions'].append(r'\>')
+                elif wt == 'stop':
+                    mdata['directions'].append(r'\!')
+
+            words = dt.find('words')
+            if words is not None and words.text:
+                txt = words.text.strip().replace('"', "'")
+                if txt:
+                    placement = child.get('placement', 'above')
+                    if placement == 'below':
+                        mdata['annotations'].append(f'_{chr(34)}{txt}{chr(34)}')
+                    else:
+                        mdata['annotations'].append(f'^{chr(34)}{txt}{chr(34)}')
+
+    def _parse_barline_elem(self, child, mdata):
+        """Parse a <barline> element."""
+        rp = child.find('repeat')
+        if rp is not None:
+            d = rp.get('direction', '')
+            if d == 'forward':
+                mdata['has_repeat_start'] = True
+            elif d == 'backward':
+                mdata['has_repeat_end'] = True
+        bs = child.find('bar-style')
+        if bs is not None and bs.text:
+            if bs.text in ('light-light', 'light-heavy', 'final'):
+                mdata['is_final'] = True
+            mdata['bar_style'] = bs.text
+
+    def _merge_aligned_notes(self, notes):
+        """Merge notes that start at the same position into chords.
+        Returns list of notes, with chord-merged notes marked is_chord=True."""
+        if len(notes) <= 1:
+            return notes
+
+        # Group by (_start, _voice)
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for n in notes:
+            key = (n.get('_start', 0), n.get('_voice', 1))
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(n)
+
+        result = []
+        prev_start = -1
+        for (start, voice), group in groups.items():
+            if len(group) == 1:
+                result.extend(group)
+            else:
+                # Multiple notes at the same start position
+                durations = [(n.get('ntype', ''), n.get('dots', 0)) for n in group]
+                same_dur = all(d == durations[0] for d in durations)
+                if same_dur and not any(n.get('is_rest') for n in group):
+                    # Merge into chord: first note stays, others get is_chord
+                    for i, n in enumerate(group):
+                        if i == 0:
+                            n['is_chord'] = False
+                        else:
+                            n['is_chord'] = True
+                    result.extend(group)
+                else:
+                    # Different durations or contains rests: keep separate, warn
+                    result.extend(group)
+            prev_start = start
+
+        return result
 
         return mdata
 
@@ -674,7 +744,8 @@ class JianpuGenerator:
 
             divs = mdata.get('divisions', 420)
             total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
-                        for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')) / 16.0
+                        for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')
+                        and not n.get('is_chord')) / 16.0
             expected_q = cur_time[0] * 4.0 / cur_time[1]
 
             if total_q > expected_q + 0.01:
@@ -806,7 +877,10 @@ class JianpuGenerator:
         pos = 0
         for note in notes:
             if note.get('is_grace'):
-                current.append(note)  # include grace notes with 0 duration
+                current.append(note)
+                continue
+            if note.get('is_chord'):
+                current.append(note)  # include chord notes but don't count duration
                 continue
             dur = type_to_64th(note.get('ntype', 'quarter'), note.get('dots', 0))
             if note.get('is_measure_rest'):
