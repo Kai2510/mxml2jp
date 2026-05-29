@@ -330,8 +330,8 @@ class MusicXmlParser:
                 if time_e is not None:
                     beats = int(time_e.findtext('beats', '4'))
                     bt = int(time_e.findtext('beat-type', '4'))
-                    if (beats, bt) != cur_time or not part_time_seen:
-                        mdata['time_change'] = (beats, bt)
+                    # Always record explicit time sigs (needed for rubato reset)
+                    mdata['time_change'] = (beats, bt)
 
                 div_e = child.find('divisions')
                 if div_e is not None:
@@ -666,7 +666,7 @@ class JianpuGenerator:
                 out.append('NextPart')
             if pname and pname.strip():
                 out.append(f"instrument={pname}")
-            out.append('OctavesBefore')  # resolve chord octave ambiguity
+            out.append('OctavesBefore')  # required for unambiguous chord parsing
 
             part_lines = self._generate_part(measures)
             out.extend(part_lines)
@@ -705,7 +705,7 @@ class JianpuGenerator:
                 lines.append(f"{prefix}={key_name}")
                 self._cur_key_sig = get_key_sig_accidentals(cur_fifths)
 
-            # Handle time change
+            # Handle time change — always emit if present (resets after rubato)
             tc = mdata.get('time_change')
             if tc is not None:
                 cur_time = tc
@@ -762,15 +762,12 @@ class JianpuGenerator:
             has_tuplet = any(n.get('tuplet_ratio') for n in raw_notes)
 
             if has_tuplet and total_q > expected_q + 0.005:
-                bt, bt_type = self._best_timesig(total_q)
                 sys.stderr.write(
                     f"WARNING: M{mdata.get('number', '?')}: tuplet measure "
-                    f"({total_q:.2f}Q vs {expected_q:.1f}Q) → replaced with rest ({bt}/{bt_type}). "
+                    f"({total_q:.2f}Q vs {expected_q:.1f}Q) → replaced with rest. "
                     f"Fill manually.\n")
-                cur_time = (bt, bt_type)
-                lines.append(f"{bt}/{bt_type}")
                 lines.append('R*1')
-                continue  # skip normal processing
+                continue  # keep cur_time unchanged  # skip normal processing
 
             if total_q > expected_q + 0.01:
                 bt, bt_type = self._best_timesig(total_q)
@@ -786,7 +783,10 @@ class JianpuGenerator:
                     cur_time = (bt, bt_type)
                     lines.append(f"{bt}/{bt_type}")
                     n_dashes = max(0, int(total_q) - 1)
-                    lines.append('0' + ' -' * n_dashes if n_dashes > 0 else '0')
+                    if n_dashes > 0:
+                        lines.append('0 ' * (n_dashes + 1))
+                    else:
+                        lines.append('0')
                     # Emit barline and skip normal note generation
                     if treated_rubato:
                         lines.append(r'LP: \bar "!"')
@@ -984,10 +984,10 @@ class JianpuGenerator:
                 if note['dots'] > 0:
                     token += '.' * note['dots']
                 tokens.append(token)
-                dashes = dash_count(note['ntype'], note['dots'])
-                for _ in range(dashes):
-                    tokens.append('-')
-                # rests do NOT set seen_real — grace after a rest is before-grace for the next pitched note
+                # Output explicit rest tokens instead of dashes
+                extra_q = dash_count(note['ntype'], note['dots'])
+                if extra_q > 0:
+                    tokens.extend(['0'] * extra_q)
                 continue
 
             # Pitched (real) note — flush grace buffers first
@@ -1158,16 +1158,24 @@ def musicxml_to_jianpu(xml_string, prefer_major=True, verbose=False):
 # ============================================================
 
 def read_input(path):
-    """Read MusicXML from .xml, .musicxml, or uncompressed .mxl."""
+    """Read MusicXML from .xml, .musicxml, or uncompressed .mxl.
+    Tries UTF-8 first, then GBK for Chinese Sibelius exports."""
     if path.endswith('.mxl'):
         with zipfile.ZipFile(path, 'r') as zf:
             for name in zf.namelist():
                 if not name.startswith('META-INF/') and name != 'mimetype':
-                    return zf.read(name).decode('utf-8')
+                    data = zf.read(name)
+                    for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+                        try: return data.decode(enc)
+                        except: continue
+                    return data.decode('utf-8', errors='replace')
             raise ValueError(f"No XML content in {path}")
     else:
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
+        data = open(path, 'rb').read()
+        for enc in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+            try: return data.decode(enc)
+            except: continue
+        return data.decode('utf-8', errors='replace')
 
 
 def main():
