@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 r"""
-mxml2jp.py v0.1.0 — Convert MusicXML to jianpu-ly input format
+mxml2jp.py v0.2.0 — Convert MusicXML to jianpu-ly input format
 
 home: E:\USTC\NMOU\mxml2jp\
 depends: jianpu-ly v1.866+ (https://github.com/ssb22/jianpu-ly)
@@ -67,7 +67,29 @@ ARTICS = {
     'fermata': r'\fermata',
     'trill-mark': r'\trill', 'mordent': r'\mordent',
     'inverted-mordent': r'\mordent', 'turn': r'\turn',
+    # v0.2.0 additions
+    'staccatissimo': r'\staccatissimo',
+    'strong-accent': r'\accent',
+    'up-bow': r'\upbow',
+    'down-bow': r'\downbow',
 }
+
+# Non-articulation notations that map to jianpu Fr= commands
+# Keys: MusicXML element tag inside <technical> or <articulations>
+# Values: Fr= argument string
+FR_MARKS = {
+    # <notations><technical><harmonic/></technical></notations>  → Fr=harmonic
+    # <notations><technical><stopped/></technical></notations>   → Fr=souyin
+    # <notations><technical><open/></technical></notations>     → Fr=0 (open string)
+}
+FR_TECHNICAL = {
+    'harmonic': 'harmonic',   # 自然泛音
+    'stopped': 'souyin',       # 顿弓 / 人工泛音
+    'open': '0',               # 空弦
+    'snap-pizzicato': 'up',    # 左手拨弦 → ↗ 记号
+}
+
+# Fingering replacement text is handled inline
 
 # Duration type -> jianpu marker (prefix) and beam count
 DUR_INFO = {
@@ -367,9 +389,11 @@ class MusicXmlParser:
         tie_start = tie_stop = False
         slur_start = False; slur_stop = False
         artic = []
+        fr_marks = []     # Fr= commands for Chinese instrument symbols
         dynamic = None
         fermata = False
         accidental_text = None
+        tremolo_beams = 0  # number of /// for tremolo
 
         notations = note_elem.find('notations')
         if notations is not None:
@@ -386,7 +410,6 @@ class MusicXmlParser:
             acc_e = notations.find('accidental')
             if acc_e is not None and acc_e.text:
                 accidental_text = acc_e.text
-                # If alter was not provided, derive it from accidental name
                 if alter_val is None and accidental_text in ACC_MAP:
                     alter_val = float(ACC_MAP[accidental_text])
 
@@ -395,12 +418,35 @@ class MusicXmlParser:
                 for a in arts_e:
                     if a.tag in ARTICS:
                         artic.append(ARTICS[a.tag])
+                    elif a.tag == 'breath-mark':
+                        pass  # breath mark — no jianpu equivalent yet
 
             orn_e = notations.find('ornaments')
             if orn_e is not None:
                 for o in orn_e:
                     if o.tag in ARTICS:
                         artic.append(ARTICS[o.tag])
+                    elif o.tag == 'tremolo':
+                        # <tremolo type="single">3</tremolo> → 3 beams → ///
+                        n_beams = int(o.text) if o.text else 1
+                        tremolo_beams = max(tremolo_beams, n_beams)
+                    elif o.tag == 'wavy-line':
+                        typ = o.get('type', '')
+                        if typ == 'start':
+                            artic.append(r'\startTrillSpan')
+                        elif typ == 'stop':
+                            artic.append(r'\stopTrillSpan')
+
+            # Technical (harmonic, stopped, fingering, etc.) → Fr= commands
+            tech_e = notations.find('technical')
+            if tech_e is not None:
+                for t in tech_e:
+                    if t.tag in FR_TECHNICAL:
+                        fr_marks.append(f"Fr={FR_TECHNICAL[t.tag]}")
+                    elif t.tag == 'fingering':
+                        txt = (t.text or '').strip()
+                        if txt:
+                            fr_marks.append(f"Fr={txt}")
 
             dyn_e = notations.find('dynamics')
             if dyn_e is not None:
@@ -462,11 +508,13 @@ class MusicXmlParser:
             'slur_start': slur_start,
             'slur_stop': slur_stop,
             'artic': artic,
+            'fr_marks': fr_marks,
             'dynamic': dynamic,
             'tuplet_start': tuplet_start,
             'tuplet_stop': tuplet_stop,
             'tuplet_ratio': tuplet_ratio,
             'fermata': fermata,
+            'tremolo_beams': tremolo_beams,
         }
 
 
@@ -568,7 +616,8 @@ class JianpuGenerator:
 
             # Detect oversize measures (more total duration than current time sig)
             divs = mdata.get('divisions', 420)
-            total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0)) for n in raw_notes if not n.get('is_grace')) / 16.0
+            total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
+                        for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')) / 16.0
             expected_q = cur_time[0] * 4.0 / cur_time[1]
 
             if total_q > expected_q + 0.01:
@@ -668,6 +717,7 @@ class JianpuGenerator:
         pos = 0
         for note in notes:
             if note.get('is_grace'):
+                current.append(note)  # include grace notes with 0 duration
                 continue
             dur = type_to_64th(note.get('ntype', 'quarter'), note.get('dots', 0))
             if note.get('is_measure_rest'):
@@ -697,33 +747,42 @@ class JianpuGenerator:
         tokens = []
         key_sig = get_key_sig_accidentals(fifths)
 
-        # Group notes: chords need special handling
-        # Store (note_data, token, chord_parts) for each note
-        # chord_parts = (octave_marks, acc, degree, dur_pref, dots) or None
         chord_buffer = []  # list of (token_str, chord_parts)
-        grace_before = []  # grace notes collected as pitch strings
+        grace_before = []   # grace notes BEFORE the next real note
+        pending_after = []  # grace notes AFTER the previous real note
         tuplet_open = False
+        seen_real = False   # have we emitted a real (non-grace) note yet?
 
         for note in mdata.get('notes', []):
             if note.get('is_grace'):
                 if note.get('step'):
                     gr = self._format_grace_note(note, fifths, key_sig)
-                    grace_before.append(gr)
+                    if seen_real:
+                        pending_after.append(gr)  # after-grace
+                    else:
+                        grace_before.append(gr)   # before-grace
                 continue
 
-            # Flush grace buffer before the first real note
-            if grace_before:
-                prefix = 'g[' + ''.join(grace_before) + ']'
-                tokens.append(prefix)
-                grace_before = []
-
+            # This is a non-grace note.
             if note.get('is_rest'):
-                if chord_buffer:
-                    tokens.append(self._format_chord_v2(chord_buffer))
-                    chord_buffer = []
+
+                def _flush_chord_and_grace():
+                    nonlocal seen_real
+                    if chord_buffer:
+                        tokens.append(self._format_chord_v2(chord_buffer))
+                        chord_buffer.clear()
+                    if pending_after:
+                        tokens[-1] = tokens[-1].rstrip() + ' [' + ''.join(pending_after) + ']g'
+                        pending_after.clear()
+                    if grace_before:
+                        tokens.append('g[' + ''.join(grace_before) + ']')
+                        grace_before.clear()
+
+                _flush_chord_and_grace()
 
                 if note.get('is_measure_rest'):
                     tokens.append('R*1')
+                    seen_real = True  # rest counts as "real" for grace tracking
                     continue
 
                 pref = DUR_INFO.get(note['ntype'], ('', 0))[0]
@@ -734,55 +793,56 @@ class JianpuGenerator:
                 dashes = dash_count(note['ntype'], note['dots'])
                 for _ in range(dashes):
                     tokens.append('-')
+                # rests do NOT set seen_real — grace after a rest is before-grace for the next pitched note
                 continue
 
-            # Flush grace buffer before the first real note
-            if grace_before:
-                prefix = 'g[' + ''.join(grace_before) + ']'
-                tokens.append(prefix)
-                grace_before = []
-
-            if note.get('is_rest'):
+            # Pitched (real) note — flush grace buffers first
+            # Emit after-grace on the PREVIOUS real note token
+            if pending_after:
+                for idx in range(len(tokens) - 1, -1, -1):
+                    t = tokens[idx]
+                    if t and not t.startswith(('g[', 'R*', '\\', '(')) and t not in ('', '~', '|', 'R{', '}', ']'):
+                        tokens[idx] = t.rstrip() + ' [' + ''.join(pending_after) + ']g'
+                        break
+                pending_after.clear()
                 if chord_buffer:
-                    tokens.append(self._format_chord_v2(chord_buffer))
-                    chord_buffer = []
+                    chord_buffer.clear()  # after-grace separates chord groups
 
-                if note.get('is_measure_rest'):
-                    tokens.append('R*1')
-                    continue
+            # Emit before-grace
+            if grace_before:
+                tokens.append('g[' + ''.join(grace_before) + ']')
+                grace_before.clear()
 
-                token = '0'
-                pref = DUR_INFO.get(note['ntype'], ('', 0))[0]
-                token = pref + '0'
-                if note['dots'] > 0:
-                    token += '.' * note['dots']
-                tokens.append(token)
-                dashes = dash_count(note['ntype'], note['dots'])
-                for _ in range(dashes):
-                    tokens.append('-')
-                continue
+            # Flush pending chord (before the new note)
+            if chord_buffer and not note.get('is_chord'):
+                tokens.append(self._format_chord_v2(chord_buffer))
+                chord_buffer.clear()
 
-            # Pitched note
             degree, acc, octave_marks = note_to_jianpu(
                 note['step'], note['octave'], note['alter'], fifths, key_sig)
 
             pref, _ = DUR_INFO.get(note['ntype'], ('', 0))
-            # Long notes (half, whole, breve): dots become extra dashes, not dots on note
             is_long = note['ntype'] in ('half', 'whole', 'breve')
             dot_s = '' if is_long else '.' * note['dots']
-            # Token order: [duration_prefix] [octave] [accidental] [degree] [dots]
             token = pref + octave_marks + acc + str(degree) + dot_s
 
-            # Extras (articulations, dynamics stay space-separated on token)
+            # Extras
             extras = []
             for a in note.get('artic', []):
                 extras.append(a)
+            for f in note.get('fr_marks', []):
+                extras.append(f)
             if note.get('dynamic'):
                 extras.append(note['dynamic'])
             if extras:
                 token += ' ' + ' '.join(extras)
 
-            # Slurs - emit as separate tokens BEFORE and AFTER the note
+            # Tremolo: append /// after the note token
+            trem_beams = note.get('tremolo_beams', 0)
+            if trem_beams > 0:
+                token += '/' * trem_beams
+
+            # Slurs — separate tokens
             prefix_tokens = []
             suffix_tokens = []
             if note.get('slur_start'):
@@ -790,10 +850,9 @@ class JianpuGenerator:
             if note.get('slur_stop'):
                 suffix_tokens.append(')')
 
-            # Ties - only emit ~ when this note is tied TO the previous one (tie_stop)
+            # Ties
             if note.get('tie_stop') and not note.get('is_chord') and tokens:
                 tokens.append('~')
-            # tie_start: the next note will have tie_stop and will get the ~
 
             # Tuplets
             if note.get('tuplet_start') and note.get('tuplet_ratio'):
@@ -804,31 +863,30 @@ class JianpuGenerator:
                 tokens.append(']')
                 tuplet_open = False
 
-            # Chord info: (octave_marks, acc, degree, dur_pref, dots_count)
             cp_data = (octave_marks, acc, degree, pref, note['dots'])
 
             if note.get('is_chord'):
                 chord_buffer.append((token, cp_data))
             else:
+                tokens.extend(prefix_tokens)
                 if chord_buffer:
                     chord_buffer.append((token, cp_data))
-                    # Emit slur prefix before chord, suffix after
-                    tokens.extend(prefix_tokens)
                     tokens.append(self._format_chord_v2(chord_buffer))
-                    tokens.extend(suffix_tokens)
-                    chord_buffer = []
+                    chord_buffer.clear()
                 else:
-                    tokens.extend(prefix_tokens)
                     tokens.append(token)
-                    tokens.extend(suffix_tokens)
                     dashes = dash_count(note['ntype'], note['dots'])
                     for _ in range(dashes):
                         tokens.append('-')
+                tokens.extend(suffix_tokens)
+
+            seen_real = True
 
         # Flush remaining
         if chord_buffer:
             tokens.append(self._format_chord_v2(chord_buffer))
-
+        if pending_after and tokens:
+            tokens[-1] = tokens[-1].rstrip() + ' [' + ''.join(pending_after) + ']g'
         if tuplet_open:
             tokens.append(']')
 
@@ -914,7 +972,7 @@ def read_input(path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='mxml2jp v0.1.0 — Convert MusicXML to jianpu-ly input text',
+        description='mxml2jp v0.2.0 — Convert MusicXML to jianpu-ly input text',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   python mxml2jp.py piece.musicxml -o piece.txt

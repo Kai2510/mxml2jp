@@ -224,14 +224,43 @@ R*5    — 5 bars of rest
 | Tempo (`<metronome>`) | ✓ |
 | Dynamics (`p/mp/mf/f/ff/...`) | ✓ |
 | Articulations (staccato, tenuto, accent) | ✓ |
+| Up-bow / down-bow | ✓ (v0.2.0) |
+| Staccatissimo | ✓ (v0.2.0) |
 | Fermata | ✓ |
 | Ties (`<tied>`) | ✓ |
 | Slurs | ✓ |
 | Chords (`<chord/>`) | ✓ |
-| Grace notes | `g[...]` only |
+| Grace notes (before + after) | ✓ (v0.2.0) |
+| Tremolo (`///`) | ✓ (v0.2.0) |
+| Trill extensions (`\startTrillSpan`/`\stopTrillSpan`) | ✓ (v0.2.0) |
+| Technical: harmonic, stopped, fingering → `Fr=` | ✓ (v0.2.0) |
 | Tuplets | `N[...]`; verify ratios |
 | Multi-bar rests | ✓ |
 
 ## License
 
 Apache 2.0
+
+---
+
+## Changelog
+
+### v0.2.0
+
+- After-grace notes (`[...]g`) support
+- Tremolo (`///`) from MusicXML `<tremolo>` ornaments
+- Trill extensions (`\startTrillSpan` / `\stopTrillSpan`) from `<wavy-line>`
+- Chinese instrument techniques via `Fr=` commands:
+  - `<harmonic/>` → `Fr=harmonic` (natural harmonic)
+  - `<stopped/>` → `Fr=souyin` (stopped note / 顿音)
+  - `<fingering>` → `Fr=N` (fingering)
+- New articulations: `\upbow`, `\downbow`, `\staccatissimo`
+- Grace notes: both before (`g[...]`) and after (`[...]g`)
+- Oversize measure auto-detection with corrected time signatures
+- `--verbose` mode for per-measure diagnostics
+- Token order: `[duration][octave][accidental][degree][dots]`
+- Slurs and ties as independent space-delimited tokens
+
+### v0.1.0
+
+- Initial release
