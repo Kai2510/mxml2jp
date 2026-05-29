@@ -346,11 +346,9 @@ class MusicXmlParser:
             elif tag == 'backup':
                 bk_dur = int(child.findtext('duration', '0'))
                 current_voice += 1
-                # Find which position we're backing up to: the END of voice 1
-                # minus the backup duration = start of the overlapping section
-                v1_start = voice_starts.get(1, 0)
+                max_pos = max(voice_starts.values()) if voice_starts else 0
                 if current_voice not in voice_starts:
-                    voice_starts[current_voice] = max(0, v1_start - bk_dur)
+                    voice_starts[current_voice] = max(0, max_pos - bk_dur)
 
             elif tag == 'forward':
                 fw_dur = int(child.findtext('duration', '0'))
@@ -433,18 +431,17 @@ class MusicXmlParser:
         if len(notes) <= 1:
             return notes
 
-        # Group by (_start, _voice)
+        # Group by _start only (ignore voice to merge simultaneous notes)
         from collections import OrderedDict
         groups = OrderedDict()
         for n in notes:
-            key = (n.get('_start', 0), n.get('_voice', 1))
+            key = n.get('_start', 0)
             if key not in groups:
                 groups[key] = []
             groups[key].append(n)
 
         result = []
-        prev_start = -1
-        for (start, voice), group in groups.items():
+        for start, group in groups.items():
             if len(group) == 1:
                 result.extend(group)
             else:
@@ -723,9 +720,8 @@ class JianpuGenerator:
                 multirest_count += 1
                 continue
             elif multirest_count > 0:
-                # Flush the accumulated multirest
                 if multirest_count == 1:
-                    lines.append('0 - - -')
+                    lines.append('R*1')
                 else:
                     lines.append(f"R*{multirest_count}")
                 multirest_count = 0
@@ -754,25 +750,28 @@ class JianpuGenerator:
                 if is_rubato or margin >= 4.0:
                     treated_rubato = True
                     sys.stderr.write(
-                        f"WARNING: Measure {mdata.get('number', '?')} ({total_q:.1f}Q vs {expected_q:.1f}Q) "
-                        f"— treating as rubato with {bt}/{bt_type}.\n")
-                    lines.append(
-                        r'LP:\once \override Staff.TimeSignature.stencil = '
-                        r'#(lambda (grob) '
-                        r'(grob-interpret-markup grob '
-                        r'#{ \markup \bold \huge "サ" #}))')
+                        f"WARNING: M{mdata.get('number', '?')} ({total_q:.1f}Q vs {expected_q:.1f}Q) "
+                        f"→ rubato {bt}/{bt_type}, notes replaced with rest. Fill manually.\n")
+                    lines.append(r'LP:\once \override Staff.TimeSignature.stencil = '
+                        r'#(lambda (grob) (grob-interpret-markup grob #{ \markup \bold \huge "サ" #}))')
                     lines.append(':LP')
+                    cur_time = (bt, bt_type)
+                    lines.append(f"{bt}/{bt_type}")
+                    n_dashes = max(0, int(total_q) - 1)
+                    lines.append('0' + ' -' * n_dashes if n_dashes > 0 else '0')
+                    # Emit barline and skip normal note generation
+                    if treated_rubato:
+                        lines.append(r'LP: \bar "!"')
+                        lines.append(':LP')
+                    raw_notes = []  # skip normal note generation
                 else:
                     sys.stderr.write(
-                        f"WARNING: Measure {mdata.get('number', '?')} has {total_q:.1f}Q — "
-                        f"expected {expected_q:.1f}Q ({cur_time[0]}/{cur_time[1]}). "
-                        f"Using {bt}/{bt_type}.\n")
+                        f"WARNING: M{mdata.get('number', '?')}: {total_q:.1f}Q in {expected_q:.1f}Q "
+                        f"→ using {bt}/{bt_type}.\n")
                     if margin <= 2.0:
-                        sys.stderr.write(
-                            f"  ↳ Only {margin:.1f} beats over — possible input error? "
-                            f"Check measure {mdata.get('number', '?')}.\n")
-                cur_time = (bt, bt_type)
-                lines.append(f"{bt}/{bt_type}")
+                        sys.stderr.write(f"  ↳ {margin:.1f} beats over — input error? Check.\n")
+                    cur_time = (bt, bt_type)
+                    lines.append(f"{bt}/{bt_type}")
 
             if self.verbose:
                 notes_ct = len(raw_notes)
@@ -823,7 +822,7 @@ class JianpuGenerator:
         # Flush remaining multirest
         if multirest_count > 0:
             if multirest_count == 1:
-                lines.append('0 - - -')
+                lines.append('R*1')
             else:
                 lines.append(f"R*{multirest_count}")
 
