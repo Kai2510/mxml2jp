@@ -181,11 +181,12 @@ def note_to_jianpu(step, octave, alter_val, fifths, key_sig):
     else:
         eff = float(alter_val)
 
-    # Diatonic steps from reference tonic at octave 4
-    dTone = step_idx - tonic_idx
-    if step_idx < tonic_idx:
-        dTone += 7
-    dTone += 7 * (octave - 4)
+    # Diatonic steps from the tonic at octave 4 (the reference for "no marks").
+    # Use absolute diatonic positions (C0 = 0) so octave boundaries are
+    # correctly centered on the tonic, not on middle C.
+    note_abs = step_idx + 7 * octave
+    tonic_abs = tonic_idx + 7 * 4
+    dTone = note_abs - tonic_abs
 
     # Degree (1-7)
     degree = dTone % 7 + 1
@@ -513,12 +514,15 @@ class MusicXmlParser:
                 if tp == 'start': slur_start = True
                 elif tp == 'stop': slur_stop = True
 
-            acc_e = notations.find('accidental')
-            if acc_e is not None and acc_e.text:
+        # <accidental> may be child of <note> (MuseScore 4.x) or child of <notations>
+        for acc_e in (note_elem.findall('accidental')
+                      + (notations.findall('accidental') if notations is not None else [])):
+            if acc_e.text and alter_val is None and acc_e.text in ACC_MAP:
+                alter_val = float(ACC_MAP[acc_e.text])
                 accidental_text = acc_e.text
-                if alter_val is None and accidental_text in ACC_MAP:
-                    alter_val = float(ACC_MAP[accidental_text])
+                break
 
+        if notations is not None:
             arts_e = notations.find('articulations')
             if arts_e is not None:
                 for a in arts_e:
@@ -697,7 +701,15 @@ class JianpuGenerator:
         multirest_count = 0
         in_repeat = False  # track repeat nesting
 
-        for mdata in measures:
+        # Pre-scan for rubato measures so we can decide dashed vs solid barlines
+        measures_list = list(measures)
+        is_rubato_list = []
+        for mdata in measures_list:
+            is_rubato_list.append(any(
+                'rubato' in a.lower() or 'cadenza' in a.lower() or '散' in a
+                for a in mdata.get('annotations', [])))
+
+        for mi, mdata in enumerate(measures_list):
             # Handle key change
             kc = mdata.get('key_change')
             if kc is not None:
@@ -743,10 +755,7 @@ class JianpuGenerator:
             # Detect oversize measures and rubato / cadenza
             raw_notes = mdata.get('notes', [])
 
-            # Detect rubato from word annotations
-            is_rubato = any(
-                'rubato' in a.lower() or 'cadenza' in a.lower() or '散' in a
-                for a in mdata.get('annotations', []))
+            is_rubato = is_rubato_list[mi]
             treated_rubato = False  # whether LP blocks were emitted
 
             divs = mdata.get('divisions', 420)
@@ -757,19 +766,19 @@ class JianpuGenerator:
             jp_total_q = sum(type_to_64th(n.get('ntype', 'quarter'), n.get('dots', 0))
                            for n in raw_notes if not n.get('is_grace') and not n.get('is_measure_rest')
                            and not n.get('is_chord')) / 16.0
-            total_q = max(total_q, jp_total_q)
-            expected_q = cur_time[0] * 4.0 / cur_time[1]
 
-            # Detect tuplet presence — replace tuplet measures with rest
+            # For tuplet measures, trust divisions-based timing only.
+            # MusicXML already compresses <duration> for tuplet notes, so
+            # divisions-based total is correct. Type-based (jp_total_q)
+            # over-counts because each note's <type> reports the nominal
+            # note shape (e.g. "eighth"), not the tuplet-adjusted length.
             has_tuplet = any(n.get('tuplet_ratio') for n in raw_notes)
+            if has_tuplet:
+                total_q = total_q  # divisions-based only
+            else:
+                total_q = max(total_q, jp_total_q)
 
-            if has_tuplet and total_q > expected_q + 0.005:
-                sys.stderr.write(
-                    f"WARNING: M{mdata.get('number', '?')}: tuplet measure "
-                    f"({total_q:.2f}Q vs {expected_q:.1f}Q) → replaced with rest. "
-                    f"Fill manually.\n")
-                lines.append('R*1')
-                continue  # keep cur_time unchanged  # skip normal processing
+            expected_q = cur_time[0] * 4.0 / cur_time[1]
 
             if total_q > expected_q + 0.01:
                 bt, bt_type = self._best_timesig(total_q)
@@ -778,22 +787,14 @@ class JianpuGenerator:
                     treated_rubato = True
                     sys.stderr.write(
                         f"WARNING: M{mdata.get('number', '?')} ({total_q:.1f}Q vs {expected_q:.1f}Q) "
-                        f"→ rubato {bt}/{bt_type}, notes replaced with rest. Fill manually.\n")
+                        f"→ rubato {bt}/{bt_type}, notes kept with free-rhythm time sig.\n")
                     lines.append(r'LP:\once \override Staff.TimeSignature.stencil = '
                         r'#(lambda (grob) (grob-interpret-markup grob #{ \markup \bold \huge "サ" #}))')
                     lines.append(':LP')
                     cur_time = (bt, bt_type)
                     lines.append(f"{bt}/{bt_type}")
-                    n_dashes = max(0, int(total_q) - 1)
-                    if n_dashes > 0:
-                        lines.append('0 ' * (n_dashes + 1))
-                    else:
-                        lines.append('0')
-                    # Emit barline and skip normal note generation
-                    if treated_rubato:
-                        lines.append(r'LP: \bar "!"')
-                        lines.append(':LP')
-                    raw_notes = []  # skip normal note generation
+                    # Notes are preserved — let normal note generation proceed.
+                    # Barline LP block is emitted after notes in the normal flow below.
                 else:
                     sys.stderr.write(
                         f"WARNING: M{mdata.get('number', '?')}: {total_q:.1f}Q in {expected_q:.1f}Q "
@@ -810,7 +811,7 @@ class JianpuGenerator:
                     f"key fifths={cur_fifths:>3}  {notes_ct:>3} notes  {total_q:.1f}Q expected={expected_q:.1f}Q\n")
 
             bar_64th = cur_time[0] * 64 // cur_time[1]
-            note_groups = self._split_notes(raw_notes, bar_64th)
+            note_groups = self._split_notes(raw_notes, bar_64th, divs)
 
             all_groups = []
             for gi, group in enumerate(note_groups):
@@ -829,6 +830,20 @@ class JianpuGenerator:
                 mtokens = self._measure_tokens(temp_mdata, cur_fifths, cur_time)
                 if temp_dirs:
                     mtokens = temp_dirs + mtokens
+
+                # Auto-close unbalanced wedges / trill spans at bar end.
+                # Without explicit stop, jianpu-ly \< / \> / \startTrillSpan
+                # would continue across dozens of bars.
+                if self.feat.get('wedges', True):
+                    has_start = any(t in ('\\<', '\\>') for t in mtokens)
+                    has_stop = any(t == '\\!' for t in mtokens)
+                    if has_start and not has_stop:
+                        mtokens.append(r'\!')
+                if self.feat.get('trill_span', True):
+                    has_start = any('\\startTrillSpan' in t for t in mtokens)
+                    has_stop = any('\\stopTrillSpan' in t for t in mtokens)
+                    if has_start and not has_stop:
+                        mtokens.append(r'\stopTrillSpan')
                 if mtokens:
                     all_groups.append(mtokens)
 
@@ -844,12 +859,14 @@ class JianpuGenerator:
                 if mdata.get('has_repeat_end') and in_repeat:
                     lines.append('}')
                     in_repeat = False
-                # Emit barline LP block if treated as rubato
+                # Emit barline LP block if treated as rubato.
+                # Use dashed barline within a rubato section, solid at the end.
                 if treated_rubato:
-                    bar_cmd = BAR_STYLE_MAP.get(mdata.get('bar_style', ''), '!')
-                    if bar_cmd:
-                        lines.append(fr'LP: \bar "{bar_cmd}"')
-                        lines.append(':LP')
+                    next_rubato = (mi + 1 < len(is_rubato_list)
+                                   and is_rubato_list[mi + 1])
+                    bar_style = '!' if next_rubato else '|'
+                    lines.append(fr'LP: \bar "{bar_style}"')
+                    lines.append(':LP')
 
         # Flush remaining multirest
         if multirest_count > 0:
@@ -861,12 +878,19 @@ class JianpuGenerator:
         return lines
 
     def _split_at_barlines(self, tokens, bar_64th):
-        """Insert '|' tokens at bar boundaries to fix oversize measures."""
+        """Insert '|' tokens at bar boundaries to fix oversize measures.
+        Does not split inside tuplet groups (between N[ and ])."""
         result = []
         pos = 0
+        in_tuplet = False
         for tok in tokens:
             dur = self._token_64th(tok)
-            if dur > 0 and pos + dur > bar_64th and pos > 0:
+            # Track tuplet brackets
+            if re.match(r'\d+\[', tok):
+                in_tuplet = True
+            if tok == ']':
+                in_tuplet = False
+            if dur > 0 and pos + dur > bar_64th and pos > 0 and not in_tuplet:
                 result.append('|')
                 pos = 0
             result.append(tok)
@@ -901,30 +925,47 @@ class JianpuGenerator:
             return True
         return False
 
-    def _split_notes(self, notes, bar_64th):
-        """Split note list into groups, each fitting within bar_64th (64th-note units)."""
+    def _split_notes(self, notes, bar_64th, divs=420):
+        """Split note list into groups, each fitting within bar_64th (64th-note units).
+        Tuplet notes use MusicXML <duration> divisions (already compressed)
+        instead of nominal <type> duration, to handle mixed-type tuplets
+        like 3[q4 s5] or 7[4 q3 s2] correctly."""
         groups = []
         current = []
-        pos = 0
+        pos = 0.0
+        in_tuplet = False
         for note in notes:
             if note.get('is_grace'):
                 current.append(note)
                 continue
             if note.get('is_chord'):
-                current.append(note)  # include chord notes but don't count duration
+                current.append(note)
                 continue
-            dur = type_to_64th(note.get('ntype', 'quarter'), note.get('dots', 0))
+
+            tr = note.get('tuplet_ratio')
+            if tr:
+                # Trust MusicXML divisions which already reflect tuplet compression
+                dur = note.get('duration', 0) * 16.0 / divs
+            else:
+                dur = float(type_to_64th(note.get('ntype', 'quarter'), note.get('dots', 0)))
+
             if note.get('is_measure_rest'):
-                dur = bar_64th
-            if dur > 0 and pos + dur > bar_64th and pos > 0:
+                dur = float(bar_64th)
+            if note.get('tuplet_start'):
+                in_tuplet = True
+            if note.get('tuplet_stop'):
+                in_tuplet = False
+            # Guard: don't split within tuplets, and keep tuplet notes
+            # together even when float roundoff makes pos slightly exceed bar_64th.
+            if dur > 0 and pos + dur - bar_64th > 0.001 and pos > 0 and not in_tuplet and not tr:
                 groups.append(current)
                 current = []
-                pos = 0
+                pos = 0.0
             current.append(note)
             if not note.get('is_measure_rest'):
                 pos += dur
             else:
-                pos = 0  # full-measure rest fills the bar exactly
+                pos = 0.0
         if current:
             groups.append(current)
         return groups
@@ -941,29 +982,35 @@ class JianpuGenerator:
         tokens = []
         key_sig = get_key_sig_accidentals(fifths)
 
-        chord_buffer = []
-
         chord_buffer = []  # list of (token_str, chord_parts)
         grace_before = []   # grace notes BEFORE the next real note
         pending_after = []  # grace notes AFTER the previous real note
         tuplet_open = False
-        seen_real = False   # have we emitted a real (non-grace) note yet?
 
-        for note in mdata.get('notes', []):
+        notes_list = mdata.get('notes', [])
+        for idx, note in enumerate(notes_list):
             if note.get('is_grace'):
                 if note.get('step'):
                     gr = self._format_grace_note(note, fifths, key_sig)
-                    if seen_real:
-                        pending_after.append(gr)  # after-grace
+                    # A grace is before-grace if the next non-grace note
+                    # ahead of it is a real (pitched) note.
+                    is_before = False
+                    for j in range(idx + 1, len(notes_list)):
+                        ahead = notes_list[j]
+                        if ahead.get('is_grace') or ahead.get('is_rest'):
+                            continue
+                        is_before = True
+                        break
+                    if is_before:
+                        grace_before.append(gr)
                     else:
-                        grace_before.append(gr)   # before-grace
+                        pending_after.append(gr)
                 continue
 
             # This is a non-grace note.
             if note.get('is_rest'):
 
                 def _flush_chord_and_grace():
-                    nonlocal seen_real
                     if chord_buffer:
                         tokens.append(self._format_chord_v2(chord_buffer))
                         chord_buffer.clear()
@@ -978,7 +1025,6 @@ class JianpuGenerator:
 
                 if note.get('is_measure_rest'):
                     tokens.append('R*1')
-                    seen_real = True  # rest counts as "real" for grace tracking
                     continue
 
                 pref = DUR_INFO.get(note['ntype'], ('', 0))[0]
@@ -1048,12 +1094,13 @@ class JianpuGenerator:
                 if trem_beams >= 3:
                     token += '///'
 
-            # Slurs — gated
+            # Slurs — gated.  LilyPond convention: '(' goes AFTER the
+            # first slurred note, ')' goes after the last.
             prefix_tokens = []
             suffix_tokens = []
             if self.feat.get('slurs'):
                 if note.get('slur_start'):
-                    prefix_tokens.append('(')
+                    suffix_tokens.append('(')
                 if note.get('slur_stop'):
                     suffix_tokens.append(')')
 
@@ -1062,13 +1109,14 @@ class JianpuGenerator:
                 if note.get('tie_stop') and not note.get('is_chord') and tokens:
                     tokens.append('~')
 
-            # Tuplets
+            # Tuplets — start as prefix, stop as suffix
+            tuplet_suffix_tokens = []
             if note.get('tuplet_start') and note.get('tuplet_ratio'):
                 tn = note['tuplet_ratio']
-                tokens.append(f"{tn[0]}[")
+                prefix_tokens.insert(0, f"{tn[0]}[")
                 tuplet_open = True
             if note.get('tuplet_stop') and tuplet_open:
-                tokens.append(']')
+                tuplet_suffix_tokens.append(']')
                 tuplet_open = False
 
             cp_data = (octave_marks, acc, degree, pref, note['dots'])
@@ -1087,8 +1135,7 @@ class JianpuGenerator:
                     for _ in range(dashes):
                         tokens.append('-')
                 tokens.extend(suffix_tokens)
-
-            seen_real = True
+                tokens.extend(tuplet_suffix_tokens)
 
         # Flush remaining
         if chord_buffer:
@@ -1160,10 +1207,31 @@ class JianpuGenerator:
 # Top-level conversion
 # ============================================================
 
-def musicxml_to_jianpu(xml_string, prefer_major=True, verbose=False, octave_traditional=False):
-    """Convert MusicXML XML string to jianpu-ly input text."""
+def musicxml_to_jianpu(xml_string, prefer_major=True, verbose=False, octave_traditional=False,
+                      part_filter=None):
+    """Convert MusicXML XML string to jianpu-ly input text.
+
+    part_filter: None (all parts), int (1-based index), or str (substring match on part name).
+    """
     parser = MusicXmlParser(prefer_major)
     title, composer, parts = parser.parse(xml_string)
+
+    if part_filter is not None:
+        filtered = []
+        for idx, (name, measures) in enumerate(parts):
+            if isinstance(part_filter, int):
+                if idx + 1 == part_filter:
+                    filtered.append((name, measures))
+            elif isinstance(part_filter, str):
+                if part_filter.lower() in name.lower():
+                    filtered.append((name, measures))
+        if not filtered:
+            avail = [f"{i+1}: {n}" for i, (n, _) in enumerate(parts)]
+            sys.stderr.write(
+                f"Warning: part filter '{part_filter}' matched no parts. "
+                f"Available: {', '.join(avail)}\n")
+            return ''
+        parts = filtered
 
     gen = JianpuGenerator(prefer_major, verbose=verbose, octave_traditional=octave_traditional)
     return gen.generate(title, composer, parts)
@@ -1196,14 +1264,17 @@ def read_input(path):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='mxml2jp v0.2.1 — Convert MusicXML to jianpu-ly input text',
+        description='mxml2jp v0.3.1 — Convert MusicXML to jianpu-ly input text',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   python mxml2jp.py piece.musicxml -o piece.txt
-  python mxml2jp.py piece.xml
+  python mxml2jp.py piece.xml -p 2
+  python mxml2jp.py full_score.musicxml -p 琵琶 -o pipa.txt
   python mxml2jp.py piece.mxl --minor""")
     ap.add_argument('input', help='MusicXML file (.xml, .musicxml, .mxl)')
     ap.add_argument('-o', '--output', help='Output file (default: stdout)')
+    ap.add_argument('-p', '--part', dest='part_filter',
+                    help='Filter part by 1-based index or name substring (e.g. "2" or "琵琶")')
     ap.add_argument('--minor', action='store_true',
                     help='Assume minor keys (6=X instead of 1=X)')
     ap.add_argument('--verbose', '-v', action='store_true',
@@ -1211,6 +1282,13 @@ def main():
     ap.add_argument('--octave-traditional', action='store_true',
                     help='Traditional octave style: low marks before digit, high marks after')
     args = ap.parse_args()
+
+    part_filter = None
+    if args.part_filter:
+        try:
+            part_filter = int(args.part_filter)
+        except ValueError:
+            part_filter = args.part_filter
 
     try:
         xml_str = read_input(args.input)
@@ -1224,7 +1302,8 @@ def main():
     try:
         result = musicxml_to_jianpu(xml_str, prefer_major=not args.minor,
                                     verbose=args.verbose,
-                                    octave_traditional=args.octave_traditional)
+                                    octave_traditional=args.octave_traditional,
+                                    part_filter=part_filter)
     except Exception as e:
         sys.stderr.write(f"Error converting: {e}\n")
         import traceback

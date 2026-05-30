@@ -286,6 +286,87 @@ jianpu-ly 使用**基于音符类型**的时值，以前缀字母和附点表示
 
 ---
 
+## 连音时值系统详解
+
+### MusicXML 如何记录连音
+
+MusicXML 对连音（tuplet）的编码包含两个层次的信息：
+
+**1. 视觉层（`<type>`）**：每个连音内的音符仍然报告其"名义"类型，如 `16th`、
+`eighth` 等。这决定符尾/符杠的绘制样式，但**不代表实际时值**。
+
+**2. 时值层（`<duration>`）：** 每个音符的 `<duration>`（以 divisions 为单位的 tick 数）
+**已经包含了连音的压缩比例**。例如，在 `divisions=420` 的乐谱中：
+
+```
+正常 16 分音符 duration = 105   (420/4)
+七连音中 16 分音符 duration = 120  (已压缩)
+```
+
+七个 16 分音的总 divisions = 7 × 120 = 840 tick = 2.0 拍，但这只是名义类型的总和。
+而七连音 `(7, 4)` 表示 7 个 16 分音应占据 4 个 16 分的空间，即 4 × 105 = 420 tick = 1.0 拍。
+MusicXML 的 `<duration>` 值最终由制谱软件按正确的总拍数分配。
+
+**3. 比例层（`<time-modification>`）：**
+
+```xml
+<time-modification>
+  <actual-notes>7</actual-notes>   <!-- 几个音 -->
+  <normal-notes>4</normal-notes>   <!-- 占几个音的正常空间 -->
+</time-modification>
+```
+
+`(actual-notes, normal-notes)` = `(7, 4)` 表示 7 个音占据 4 个音的正常空间。
+
+**4. 分组边界（`<tuplet>`）：**
+
+```xml
+<notations>
+  <tuplet type="start"/>   <!-- 连音开始 -->
+  <tuplet type="stop"/>    <!-- 连音结束 -->
+</notations>
+```
+
+### 混合类型连音
+
+连音组内的音符不一定都是同一类型。以下都是合法的：
+
+- `3[ q4 s5 ]`：三连音内有一个八分音 + 一个 16 分音
+- `7[ 4 q3 s2 ]`：七连音内有一个四分音 + 一个八分音 + 一个 16 分音
+
+在这些情况下，`<time-modification>` 的比例适用于整组音符的总时长，而非每个单独的
+音符。因此，用 `<type>` × 比例来估算每个音符的时值是错误的。
+
+### mxml2jp 的处理策略
+
+**小节拍数检测**：对含连音的小节，只使用 divisions 总和（`<duration>` 累加），不参与
+`max(total_q, jp_total_q)` 的最大值合并。因为 MusicXML 的 `<duration>` 已经包含了
+压缩比例，divisions 总和与拍号精确对齐。
+
+**`_split_notes` 小节拆分**：对连音组内的每个音符，使用
+`note['duration'] × 16.0 / divisions` 计算真实 64 分音符单位数，替代
+`type_to_64th()` 的类型估算。这确保混合类型连音和均匀类型连音都正确计算。
+
+**`N[...]` 括号生成**：`tuplet_start` → 输出 `N[`（前缀），`tuplet_stop` → 输出 `]`
+（后缀，跟在最后一个音符的增时线之后）。括号包裹整个连音组的所有音符。
+
+**依赖 jianpu-ly 的 `$j2ly_sloppy_bars` 容错**：即使小节长度略有偏差，jianpu-ly
+也能在 LilyPond 编译时容忍并正确排版。
+
+### 相关技术要点
+
+1. **`<time-modification>` 与 `<tuplet>` 的配合**：
+   - `<time-modification>` 只在组内首音出现（某些制谱软件可能在所有音上重复），提供比例信息。
+   - `<tuplet type="start">` / `<tuplet type="stop">` 标记括号的起止位置。
+   - 两者必须配合使用才能正确生成 `N[...]` 标记。
+
+2. **`<accidental>` 的位置差异**：
+   - 在标准 MusicXML 中，`<accidental>` 是 `<notations>` 的子元素。
+   - 但在 MuseScore 4.x 的导出中，`<accidental>` 可能作为 `<note>` 的直接子元素出现。
+   - mxml2jp 同时检查两处位置，确保变音记号被正确解析。
+
+---
+
 ## 音符解析细节
 
 ### 演奏记号映射
@@ -377,13 +458,12 @@ margin = total_q - expected_q
 
 | 偏差 | 条件 | 处理方式 |
 |------|------|---------|
-| 任意 | 含连音记号 | 整小节替换为 `R*1`；警告用户；拍号不变 |
-| ≥ 4 拍 或 散板 | `is_rubato` 或 `margin >= 4.0` | 发 LP 块：将拍号模板替换为"サ"（散板记号）；修正拍号；音符替换为 `0` 休止；警告用户 |
-| < 4 拍 | `margin < 4.0` | 修正拍号以匹配；警告用户；音符保留但可能对不齐 |
+| ≥ 4 拍 或 散板 | `is_rubato` 或 `margin >= 4.0` | 发 LP 块：将拍号模板替换为"サ"（散板记号）；修正拍号；音符保留；警告用户 |
+| < 4 拍 | `margin < 4.0` | 修正拍号以匹配；警告用户；音符保留 |
 | 精确 | `total_q == expected_q` | 正常处理 |
 
-**重要局限**：当超长小节以休止符处理（散板或连音）时，**原始音符被丢弃**。用户必须手动
-填入正确的音符，并调整拍号。此情况会在 stderr 输出警告。
+**注意**：含连音记号的小节，总拍数使用 MusicXML divisions 计算（已包含压缩），
+不依赖 `<type>` 类型时值，因此连音小节不再误判为超长。详见下文[连音时值系统详解](#连音时值系统详解)。
 
 ---
 
@@ -558,45 +638,36 @@ Get-ChildItem ..\lilypond教学\*.musicxml,..\lilypond教学\*.xml | ForEach-Obj
 
 ### 设计局限
 
-1. **连音小节被丢弃** — 任何包含连音的小节被替换为 `R*1`（整小节休止）。用户收到 stderr
-   警告后必须手动填入。这是实际使用中最大的缺口，因为大多数真实乐谱都使用三连音等。
-
-2. **散板/cadenza 音符被丢弃** — 超长小节（判定为散板）将所有音符替换为 `0` 休止。
-   小节线、拍号和"サ"模板被保留，但音符内容丢失。
-
-3. **多声部和弦跨声部合并** — `_merge_aligned_notes()` 不尊重 `voice` 属性。
+1. **多声部和弦跨声部合并** — `_merge_aligned_notes()` 不尊重 `voice` 属性。
    不同声部中同时触发的独立旋律被错误合并为和弦。
 
-4. **多声部散板小节尚未同步** — 当两个声部共用一个散板段落时，它们的休止填充长度可能
-   不同，导致最终乐谱中声部不对齐。
+2. **多声部散板小节尚未同步** — 当两个声部共用一个散板段落时，音符时值在声部间可能
+   不对齐。
 
-5. **Sibelius 导出的中文可能乱码** — Sibelius 以非 UTF-8 编码导出中文文本。
+3. **Sibelius 导出的中文可能乱码** — Sibelius 以非 UTF-8 编码导出中文文本。
    `read_input()` 尝试 UTF-8 然后 GBK/GB2312 fallback，但不能覆盖所有情况。
    已知受影响的文件：`草原小姐妹总谱.musicxml`。
 
-6. **仅支持 partwise MusicXML** — Timewise MusicXML（score-timewise）会抛出错误。
+4. **仅支持 partwise MusicXML** — Timewise MusicXML（score-timewise）会抛出错误。
    大多数现代制谱软件默认导出 partwise 格式，因此这很少成为问题。
 
 ### 代码缺陷
 
-7. **不可达代码** — 第 462–463 行：`_merge_aligned_notes()` 已 return 后还有一个
+5. **不可达代码** — 第 462–463 行：`_merge_aligned_notes()` 已 return 后还有一个
    `return mdata`。第 927–937 行：`_split_notes()` return 后有一段重复的
    `_is_whole_rest_measure` 代码。
 
-8. **`LP_TECHNICAL` 字典被覆盖** — 定义了两次（第 92–98 行和第 100–104 行）。
+6. **`LP_TECHNICAL` 字典被覆盖** — 定义了两次（第 92–98 行和第 100–104 行）。
    第二次覆盖第一次，丢失了 `'stopped': r'\stopped'` 条目。
 
-9. **硬编码 Windows 路径** — 第 6 行含 `E:\USTC\NMOU\mxml2jp\`，应删除。
+7. **硬编码 Windows 路径** — 第 6 行含 `E:\USTC\NMOU\mxml2jp\`，应删除。
 
-10. **README 说 `.mxl` 是 TODO** — 但 `read_input()` 已通过 `zipfile.ZipFile` 实现
-    了 `.mxl` 解压。该 TODO 条目已过时。
+8. **README 说 `.mxl` 是 TODO** — 但 `read_input()` 已通过 `zipfile.ZipFile` 实现
+   了 `.mxl` 解压。该 TODO 条目已过时。
 
 ---
 
 ## 待完善事项
-
-- **连音时值计算**：利用 MusicXML `<duration>` divisions 计算连音组内实际音符到音符
-  的时值，以生成正确的 `N[...]` 输出，替代目前的替换策略。
 
 - **多声部小节同步**：确保散板休止长度在各声部间一致，使最终乐谱对齐。
 
@@ -623,9 +694,21 @@ Get-ChildItem ..\lilypond教学\*.musicxml,..\lilypond教学\*.xml | ForEach-Obj
 
 ## 更新日志
 
+### v0.3.1 (开发中)
+- **连音支持**：连音小节不再替换为休止；使用 MusicXML divisions 计算真实时值
+  - `_split_notes` 对连音内音符使用 `<duration>` divisions 而非 `<type>` 类型估算
+  - 支持混合类型连音（如 `3[q4 s5]`, `7[4 q3 s2]`）
+  - `N[...]` 括号正确包裹整个连音组（`tuplet_stop` 的 `]` 改为后缀而非前缀）
+- **散板保留音符**：超长/散板小节不再丢弃音符，仅调整拍号 + "サ" 模板
+- **圆滑线**：`(` 改为后缀（LilyPond 约定：`c4 ( d4 e4 )` 而非 `( c4 d4 e4 )`）
+- **`<accidental>` 双重位置**：同时检查 `<note>` 直接子元素和 `<notations>` 内部
+  （兼容 MuseScore 4.x 的导出格式）
+- **`--part` / `-p` 选项**：按 1-based 索引或名称子串筛选特定声部
+- **小节拆分**：连音组不跨小节线拆分，保留完整 `N[...]` 边界
+
 ### v0.3.0
 - `--octave-traditional` 传统八度格式选项
-- 连音小节替换为 `R*1`，不改变拍号
+- 连音小节替换为 `R*1`，不改变拍号（已由 v0.3.1 修复为正常生成）
 - `read_input()`：UTF-8/GBK 多编码 fallback
 - 休止符用显式 `0` 替代增时线
 - 散板后拍号总是恢复

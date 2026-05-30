@@ -299,6 +299,101 @@ or encoding errors).
 
 ---
 
+## Tuplet Timing Deep Dive
+
+### How MusicXML Encodes Tuplets
+
+MusicXML encodes tuplets with two layers of information:
+
+**1. Visual layer (`<type>`):** Each note within a tuplet still reports its
+"nominal" type, such as `16th`, `eighth`, etc. This determines the drawing
+style of beams/flags but does **not** represent the actual duration.
+
+**2. Timing layer (`<duration>`):** Each note's `<duration>` (in divisions-based
+ticks) **already incorporates the tuplet compression ratio**. For example, in a
+score with `divisions=420`:
+
+```
+Normal 16th note duration = 105   (420/4)
+16th note in a 7-tuplet  duration = 120  (already compressed)
+```
+
+Seven 16th notes total divisions = 7 × 120 = 840 ticks = 2.0 beats, which is only
+the sum of nominal types. The tuplet `(7, 4)` means 7 sixteenths should occupy the
+space of 4 sixteenths, i.e. 4 × 105 = 420 ticks = 1.0 beat. The MusicXML
+`<duration>` values are ultimately assigned by the notation software to match the
+correct total beat count.
+
+**3. Ratio layer (`<time-modification>`):**
+
+```xml
+<time-modification>
+  <actual-notes>7</actual-notes>   <!-- how many notes -->
+  <normal-notes>4</normal-notes>   <!-- how many normal-note spaces they occupy -->
+</time-modification>
+```
+
+`(actual-notes, normal-notes)` = `(7, 4)` means 7 notes occupy the space of 4
+normal notes.
+
+**4. Group boundaries (`<tuplet>`):**
+
+```xml
+<notations>
+  <tuplet type="start"/>   <!-- tuplet begins -->
+  <tuplet type="stop"/>    <!-- tuplet ends -->
+</notations>
+```
+
+### Mixed-Type Tuplets
+
+Notes within a tuplet group are not necessarily all the same type. The following
+are all valid:
+
+- `3[ q4 s5 ]`: A triplet with one eighth + one 16th
+- `7[ 4 q3 s2 ]`: A septuplet with one quarter + one eighth + one 16th
+
+In these cases, the `<time-modification>` ratio applies to the total duration of
+the entire group, not to each individual note. Therefore, estimating each note's
+duration via `<type>` × ratio is incorrect.
+
+### mxml2jp's Handling Strategy
+
+**Measure beat detection:** For measures containing tuplets, only the divisions
+sum (`<duration>` accumulation) is used, without participating in the
+`max(total_q, jp_total_q)` merge. Since MusicXML `<duration>` values already
+incorporate the compression ratio, the divisions sum aligns precisely with the
+time signature.
+
+**`_split_notes` measure splitting:** For each note within a tuplet group, the
+actual 64th-note unit count is computed via `note['duration'] * 16.0 / divisions`,
+replacing the `type_to_64th()` estimation. This ensures correct calculation for
+both mixed-type and uniform tuplets.
+
+**`N[...]` bracket generation:** `tuplet_start` → emits `N[` (prefix);
+`tuplet_stop` → emits `]` (suffix, placed after the last note's dash tokens).
+The brackets enclose all notes in the tuplet group.
+
+**Relies on jianpu-ly's `$j2ly_sloppy_bars` tolerance:** Even if the measure
+length has slight deviations, jianpu-ly tolerates them and lays out correctly
+during LilyPond compilation.
+
+### Related Technical Notes
+
+1. **`<time-modification>` and `<tuplet>` cooperation:**
+   - `<time-modification>` only appears on the first note of a group (some
+     notation software may repeat it on all notes), providing the ratio.
+   - `<tuplet type="start">` / `<tuplet type="stop">` mark bracket boundaries.
+   - Both must be used together to correctly generate `N[...]` markup.
+
+2. **`<accidental>` position differences:**
+   - In standard MusicXML, `<accidental>` is a child of `<notations>`.
+   - However, in MuseScore 4.x exports, `<accidental>` may appear as a direct
+     child of `<note>`.
+   - mxml2jp checks both locations to ensure accidentals are correctly parsed.
+
+---
+
 ## Note Parsing Details
 
 ### Articulation mapping
@@ -397,15 +492,15 @@ If `total_q > expected_q + 0.01`, the bar is oversize.
 
 | Margin | Condition | Action |
 |--------|-----------|--------|
-| Any | Has tuplets | Replace entire measure with `R*1`; warn user; keep time sig unchanged |
-| ≥ 4 beats or rubato | `is_rubato` or `margin >= 4.0` | Emit LP block: override time sig stencil with "サ" (free rhythm glyph); correct time sig; replace notes with `0` rests; warn user |
-| < 4 beats | `margin < 4.0` | Correct time sig to fit; warn user; notes are preserved but may not align perfectly |
+| ≥ 4 beats or rubato | `is_rubato` or `margin >= 4.0` | Emit LP block: override time sig stencil with "サ" (free rhythm glyph); correct time sig; notes preserved; warn user |
+| < 4 beats | `margin < 4.0` | Correct time sig to fit; warn user; notes preserved |
 | Exact | `total_q == expected_q` | Normal processing |
 
-**Important limitation**: When an oversize bar is handled with rests (rubato
-or tuplet), the original notes are **discarded**. The user must manually
-enter the correct notes and tweak the time signature. This is flagged as a
-stderr warning.
+**Note**: For measures containing tuplet marks, the total beat count is computed
+using MusicXML divisions (which already include compression ratios), rather than
+relying on `<type>` durations. Tuplet measures are therefore no longer falsely
+detected as oversize. See [Tuplet Timing Deep Dive](#tuplet-timing-deep-dive)
+below for details.
 
 ---
 
@@ -587,55 +682,42 @@ Get-ChildItem ..\lilypond教学\*.musicxml,..\lilypond教学\*.xml | ForEach-Obj
 
 ### Design limitations
 
-1. **Tuplet measures are discarded** — Any measure containing tuplets is
-   replaced with `R*1` (full-bar rest). The user receives a stderr warning
-   and must fill the measure manually. This is the largest gap for practical
-   use, as most real-world scores use triplets and other tuplets.
-
-2. **Rubato/cadenza notes are discarded** — Oversize measures (detected as
-   rubato) replace all notes with `0` rests. The barline, time sig, and "サ"
-   stencil are preserved, but the content is lost.
-
-3. **Multi-voice chords merged across voices** — `_merge_aligned_notes()` does
+1. **Multi-voice chords merged across voices** — `_merge_aligned_notes()` does
    not respect the `voice` attribute. Independent voices with simultaneous
    attacks get merged into spurious chords.
 
-4. **No multi-voice bar synchronization for rubato** — When two parts share
+2. **No multi-voice bar synchronization for rubato** — When two parts share
    a rubato section, their rest fillers may differ in length, causing
    misalignment in the final score.
 
-5. **Chinese text from Sibelius may encode as gibberish** — Sibelius exports
+3. **Chinese text from Sibelius may encode as gibberish** — Sibelius exports
    Chinese text in non-UTF-8 encodings. The `read_input()` function tries
    UTF-8 then GBK/GB2312 fallback, but this does not cover all cases.
    Known affected file: `草原小姐妹总谱.musicxml`.
 
-6. **Only partwise MusicXML is supported** — Timewise MusicXML (score-timewise)
+4. **Only partwise MusicXML is supported** — Timewise MusicXML (score-timewise)
    will raise an error. Most modern notation software exports partwise by
    default, so this is rarely a problem.
 
 ### Code bugs
 
-7. **Unreachable code** — Line 462–463: a second `return mdata` after
+5. **Unreachable code** — Line 462–463: a second `return mdata` after
    `_merge_aligned_notes()` has already returned. Lines 927–937: duplicate
    `_is_whole_rest_measure` code after `_split_notes()` return.
 
-8. **`LP_TECHNICAL` dict overwritten** — Defined twice (lines 92–98 and
+6. **`LP_TECHNICAL` dict overwritten** — Defined twice (lines 92–98 and
    100–104). The second definition overwrites the first, losing the
    `'stopped': r'\stopped'` entry.
 
-9. **Hardcoded Windows path** — Line 6 contains `E:\USTC\NMOU\mxml2jp\`,
+7. **Hardcoded Windows path** — Line 6 contains `E:\USTC\NMOU\mxml2jp\`,
    which is a local Windows path and should be removed.
 
-10. **README lists `.mxl` as TODO** — But `read_input()` already implements
-    `.mxl` decompression via `zipfile.ZipFile`. The TODO item is stale.
+8. **README lists `.mxl` as TODO** — But `read_input()` already implements
+   `.mxl` decompression via `zipfile.ZipFile`. The TODO item is stale.
 
 ---
 
 ## TODO / Future Work
-
-- **Tuplet timing**: Use MusicXML `<duration>` divisions to calculate actual
-  note-to-note timing for tuplet groups, enabling proper `N[...]` output
-  instead of the current replacement strategy.
 
 - **Multi-voice bar synchronization**: Ensure that rubato rest lengths are
   consistent across parts sharing the same measure, so the final score aligns
@@ -669,6 +751,25 @@ Get-ChildItem ..\lilypond教学\*.musicxml,..\lilypond教学\*.xml | ForEach-Obj
 ---
 
 ## Changelog
+
+### v0.3.1 (in development)
+- **Tuplet support**: Tuplet measures no longer replaced with rests; actual
+  timing computed from MusicXML divisions
+  - `_split_notes` uses `<duration>` divisions rather than `<type>` estimation
+    for notes within tuplets
+  - Mixed-type tuplets supported (e.g. `3[q4 s5]`, `7[4 q3 s2]`)
+  - `N[...]` brackets correctly enclose the entire tuplet group (`tuplet_stop`
+    `]` is now a suffix, not a prefix)
+- **Rubato note preservation**: Oversize/rubato measures no longer discard
+  notes; only time sig is adjusted + "サ" stencil override
+- **Slur convention fix**: `(` is now a suffix (LilyPond convention:
+  `c4 ( d4 e4 )` rather than `( c4 d4 e4 )`)
+- **`<accidental>` dual-location**: Checks both direct `<note>` children and
+  `<notations>` content (compatible with MuseScore 4.x exports)
+- **`--part` / `-p` option**: Filter specific parts by 1-based index or name
+  substring
+- **Tuplet boundary splitting**: Tuplet groups are not split across barlines,
+  preserving complete `N[...]` boundaries
 
 ### v0.3.0
 - `--octave-traditional` flag for old-style octave marks
